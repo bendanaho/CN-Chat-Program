@@ -15,13 +15,21 @@ public class Theme {
     public static final String SELF = "%SELF%";  // 自己的消息 灰
     public static final String TIME = "%TIME%";  // 时间戳 浅灰
     private static boolean dark = load();
+    // 气泡界面(功能二十七)配色占位符
+    public static final String CHATBG   = "%CHATBG%";   // 聊天区背景(衬托气泡)
+    public static final String SELFBUB  = "%SELFBUB%";  // 自己的气泡(仿微信绿)
+    public static final String OTHERBUB = "%OTHERBUB%"; // 对方的气泡
+    public static final String BUBTX    = "%BUBTX%";    // 气泡内文字
     public static boolean isDark() { return dark; }
     public static void toggle() { dark = !dark; save(); }
     public static String bg() { return dark ? "#1e1f22" : "#ffffff"; }
     public static String fg() { return dark ? "#e8e8e8" : "#000000"; }
-    public static Color bgColor()    { return Color.decode(bg()); }
-    public static Color fgColor()    { return Color.decode(fg()); }
-    public static Color panelColor() { return dark ? Color.decode("#2b2d31") : Color.decode("#f2f2f2"); }
+    public static Color bgColor()      { return Color.decode(bg()); }
+    public static Color fgColor()      { return Color.decode(fg()); }
+    public static Color panelColor()   { return dark ? Color.decode("#2b2d31") : Color.decode("#f0f2f5"); }
+    public static String chatBg()      { return dark ? "#232428" : "#ededed"; } // 微信式浅灰聊天背景
+    public static Color chatBgColor()  { return Color.decode(chatBg()); }
+    public static Color accentColor()  { return dark ? Color.decode("#3e5a4a") : Color.decode("#07c160"); } // 微信绿
     /** 把 HTML 中的颜色占位符替换为当前主题的实际色值 */
     public static String apply(String html) {
         return html.replace(PRIV, dark ? "#c39bd3" : "#9933cc")
@@ -29,7 +37,11 @@ public class Theme {
                    .replace(ERR,  dark ? "#ff7b72" : "#cc0000")
                    .replace(OK,   dark ? "#7ee787" : "#008800")
                    .replace(SELF, dark ? "#9aa0a6" : "#888888")
-                   .replace(TIME, dark ? "#707070" : "#aaaaaa");
+                   .replace(TIME, dark ? "#707070" : "#999999")
+                   .replace(CHATBG,   chatBg())
+                   .replace(SELFBUB,  dark ? "#2e4d3a" : "#95ec69")
+                   .replace(OTHERBUB, dark ? "#3a3b3f" : "#ffffff")
+                   .replace(BUBTX,    dark ? "#e8e8e8" : "#111111");
     }
     private static File prefFile() { return new File(System.getProperty("user.home"), ".chattool-theme"); }
     private static boolean load() {
