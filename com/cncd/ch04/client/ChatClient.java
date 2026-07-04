@@ -46,7 +46,7 @@ public class ChatClient extends JFrame implements KeyListener, ActionListener, F
     HashMap sentPm = new HashMap();     // 我发出的私聊 id -> {会话, 正文},收到 READ 时更新已读(功能十九)
     HashMap lastRecvId = new HashMap(); // 会话 -> 最近收到的对方私聊消息 id(打开会话时回执,功能十九)
     JButton buttonRoom;                 // 加入/创建群组
-    JLabel statusBar, typingLabel;      // 网络状态栏(功能十五)、正在输入提示(功能十九)
+    JLabel statusBar, typingLabel, peerTitle; // 状态栏/正在输入/右栏标题(对方信息↔群成员)
     long lastTypingSent = 0;            // /typing 节流
     javax.swing.Timer typingClearTimer; // 定时清除"对方正在输入"
     ClientKernel ck;
@@ -178,7 +178,7 @@ public class ChatClient extends JFrame implements KeyListener, ActionListener, F
         eastPanel.add(new JScrollPane(userList), BorderLayout.CENTER);
         //East 用 CardLayout：公共聊天室显示在线用户，私聊会话显示对方信息
         JPanel peerPanel = new JPanel(new BorderLayout());
-        peerPanel.add(new JLabel("对方信息", JLabel.CENTER), BorderLayout.NORTH);
+        peerPanel.add(peerTitle = new JLabel("对方信息", JLabel.CENTER), BorderLayout.NORTH);
         infoPane = new JEditorPane("text/html", "");
         infoPane.setEditable(false);
         peerPanel.add(new JScrollPane(infoPane), BorderLayout.CENTER);
@@ -387,10 +387,26 @@ public class ChatClient extends JFrame implements KeyListener, ActionListener, F
             showUserInfo(cmd.substring(9));
         } else if(cmd.startsWith("NEEDPASS")) {
             promptEntryPass();
+        } else if(cmd.startsWith("ROOMMEM ")) {
+            // 群成员列表: ROOMMEM <房间> <成员...> → 若正看该群,渲染进右栏
+            int sp = cmd.indexOf(' ', 8);
+            String room = (sp < 0) ? cmd.substring(8) : cmd.substring(8, sp);
+            if(("#" + room).equals(currentConv)) {
+                String html = "<b>群 " + room + "</b><br>";
+                if(sp > 0) {
+                    StringTokenizer st = new StringTokenizer(cmd.substring(sp + 1));
+                    while(st.hasMoreTokens()) html += "<br>· " + st.nextToken();
+                } else html += "<br>(空)";
+                rawInfoHtml = html;
+                infoPane.setText(Theme.apply(html));
+            }
         } else if(cmd.startsWith("ROOMS")) {
             rooms.clear();
             StringTokenizer st = new StringTokenizer(cmd.length() > 5 ? cmd.substring(5) : "");
             while(st.hasMoreTokens()) rooms.add(st.nextToken());
+            // 若当前正看的群组已不在我的群组列表(被移出/退出)→ 回到公共聊天室
+            if(currentConv.startsWith("#") && !rooms.contains(currentConv.substring(1)))
+                openConv(MAIN_ROOM);
             rebuildConvList();
         } else if(cmd.startsWith("ROOM ")) {
             // 群组消息: ROOM <id> <房间> <发送者> <正文>
@@ -570,7 +586,8 @@ public class ChatClient extends JFrame implements KeyListener, ActionListener, F
             h = new ClientHistory();
             convs.put(name, h);
             centerCards.add(new JScrollPane(h), name);
-            if(!containsIgnoreCase(friends, name)) tempConvs.add(name); // 非好友归入临时会话分组
+            // 非好友、且不是群组(#开头)的会话才算"临时会话"
+            if(!name.startsWith("#") && !containsIgnoreCase(friends, name)) tempConvs.add(name);
             rebuildConvList();
         }
         return h;
@@ -585,9 +602,17 @@ public class ChatClient extends JFrame implements KeyListener, ActionListener, F
         ensureConv(name);
         unread.remove(name);
         centerLayout.show(centerCards, name);
-        if(MAIN_ROOM.equals(name) || name.startsWith("#")) {
-            eastLayout.show(eastCards, "users"); // 群聊/群组:右栏显示在线用户
+        if(MAIN_ROOM.equals(name)) {
+            peerTitle.setText("在线用户");
+            eastLayout.show(eastCards, "users"); // 公共聊天室:右栏显示全部在线用户
+        } else if(name.startsWith("#")) {
+            peerTitle.setText("群成员");
+            eastLayout.show(eastCards, "info");  // 群组:右栏显示本群成员
+            buttonAddFriend.setVisible(false);
+            infoPane.setText("加载群成员...");
+            if(ck != null && ck.isConnected()) ck.sendMessage("/roommem " + name.substring(1));
         } else {
+            peerTitle.setText("对方信息");
             eastLayout.show(eastCards, "info");
             buttonAddFriend.setVisible(!containsIgnoreCase(friends, name)); // 已是好友就不显示"加为好友"
             infoPane.setText("查询中...");
@@ -618,7 +643,7 @@ public class ChatClient extends JFrame implements KeyListener, ActionListener, F
         boolean headerAdded = false;
         for(int i=0;i<tempConvs.size();i++) {
             String t = (String)tempConvs.get(i);
-            if(containsIgnoreCase(friends, t)) continue; // 已加为好友的会话不再算"临时"
+            if(t.startsWith("#") || containsIgnoreCase(friends, t)) continue; // 群组、已加好友的不算"临时"
             if(!headerAdded) { addConvItem("── 临时会话 ──", null); headerAdded = true; }
             addConvItem(t, t);
         }
@@ -667,16 +692,26 @@ public class ChatClient extends JFrame implements KeyListener, ActionListener, F
         Object o = itemNames.get(idx);
         if(o == null) return;
         final String name = o.toString();
-        if(!containsIgnoreCase(friends, name)) return;
         convList.setSelectedIndex(idx);
         JPopupMenu menu = new JPopupMenu();
-        JMenuItem del = new JMenuItem("删除好友");
-        del.addActionListener(new ActionListener() {
-            public void actionPerformed(ActionEvent ev) {
-                if(ck != null && ck.isConnected()) ck.sendMessage("/delfriend " + name);
-            }
-        });
-        menu.add(del);
+        if(name.startsWith("#")) {                 // 群组:退出群组
+            final String room = name.substring(1);
+            JMenuItem leave = new JMenuItem("退出群组");
+            leave.addActionListener(new ActionListener() {
+                public void actionPerformed(ActionEvent ev) {
+                    if(ck != null && ck.isConnected()) ck.sendMessage("/part " + room);
+                }
+            });
+            menu.add(leave);
+        } else if(containsIgnoreCase(friends, name)) { // 好友:删除好友
+            JMenuItem del = new JMenuItem("删除好友");
+            del.addActionListener(new ActionListener() {
+                public void actionPerformed(ActionEvent ev) {
+                    if(ck != null && ck.isConnected()) ck.sendMessage("/delfriend " + name);
+                }
+            });
+            menu.add(del);
+        } else return; // 公共聊天室/临时会话/表头:无菜单
         menu.show(convList, e.getX(), e.getY());
     }
     // 计算 <img> 的等比缩略尺寸属性（240px 上限）；发送与接收两侧共用

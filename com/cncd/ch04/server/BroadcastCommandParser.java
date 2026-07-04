@@ -26,7 +26,7 @@ public class BroadcastCommandParser implements CommandParser {
     private final HashMap transfers = new HashMap();
     // 阶段二命令
     private final String ENTER = "enter";     // 准入口令(功能十八)
-    private final String JOIN = "join", PART = "part", ROOMS = "rooms", ROOM = "room"; // 群组(功能十七)
+    private final String JOIN = "join", PART = "part", ROOMS = "rooms", ROOM = "room", ROOMMEM = "roommem"; // 群组(功能十七)
     private final String KICK = "kick", MUTE = "mute", UNMUTE = "unmute", ANNOUNCE = "announce"; // 管理(功能十八)
     private final String READ = "read", TYPING = "typing"; // 已读回执/正在输入(功能十九)
     private final String RECALL = "recall";   // 消息撤回(功能二十)
@@ -99,6 +99,8 @@ public class BroadcastCommandParser implements CommandParser {
                     listRooms(cc);
                 else if(command.equalsIgnoreCase(ROOM))
                     room(cc, strTok);
+                else if(command.equalsIgnoreCase(ROOMMEM))
+                    pushMembers(cc, strTok.hasMoreTokens() ? strTok.nextToken() : "");
                 else if(command.equalsIgnoreCase(KICK))
                     kick(cc, strTok);
                 else if(command.equalsIgnoreCase(MUTE))
@@ -344,6 +346,7 @@ public class BroadcastCommandParser implements CommandParser {
         cc.sendMessage("<font color=\"#008800\">已加入群组 [" + room + "]</font>");
         roomNotice(cc, room, cc.nick + " 加入了群组");
         pushRooms(cc);
+        pushMembersToRoom(cc, room); // 全体成员的群成员栏刷新
     }
     private void part(ConnectedClient cc, StringTokenizer st) {
         if(!st.hasMoreTokens()) { cc.sendMessage("usage: /part <群名>"); return; }
@@ -352,6 +355,19 @@ public class BroadcastCommandParser implements CommandParser {
         cc.sendMessage("已退出群组 [" + room + "]");
         roomNotice(cc, room, cc.nick + " 退出了群组");
         pushRooms(cc);
+        pushMembersToRoom(cc, room); // 通知剩余成员刷新群成员栏
+    }
+    private void pushMembers(ConnectedClient cc, String room) {
+        String[] m = MainServer.rooms.members(room);
+        StringBuffer sb = new StringBuffer("" + MainServer.PUSHMARKER + "ROOMMEM " + room);
+        for(int i=0;i<m.length;i++) sb.append(' ').append(m[i]);
+        cc.sendMessage(sb.toString());
+    }
+    private void pushMembersToRoom(ConnectedClient any, String room) {
+        String[] m = MainServer.rooms.members(room);
+        StringBuffer sb = new StringBuffer("" + MainServer.PUSHMARKER + "ROOMMEM " + room);
+        for(int i=0;i<m.length;i++) sb.append(' ').append(m[i]);
+        sendToRoom(room, sb.toString(), any);
     }
     private void listRooms(ConnectedClient cc) {
         String[] all = MainServer.rooms.allRooms();
