@@ -260,8 +260,7 @@ public class ChatClient extends JFrame implements KeyListener, ActionListener, F
         userList.setCellRenderer(new DefaultListCellRenderer() {
             public Component getListCellRendererComponent(JList l, Object v, int idx, boolean sel, boolean foc) {
                 JLabel lb = (JLabel)super.getListCellRendererComponent(l, v, idx, sel, foc);
-                Object ic = (v == null) ? null : avatars.get(v.toString().toLowerCase());
-                lb.setIcon(ic == null ? null : (Icon)ic);
+                lb.setIcon(v == null ? null : listIconFor(v.toString())); // 无头像 → 默认头像
                 return lb;
             }
         });
@@ -271,10 +270,7 @@ public class ChatClient extends JFrame implements KeyListener, ActionListener, F
                 Icon ic = null;
                 if(idx >= 0 && idx < itemNames.size()) {
                     Object name = itemNames.get(idx);
-                    if(name != null && !name.toString().startsWith("#")) {
-                        Object o = avatars.get(name.toString().toLowerCase());
-                        if(o != null) ic = (Icon)o;
-                    }
+                    if(name != null && !name.toString().startsWith("#")) ic = listIconFor(name.toString());
                 }
                 lb.setIcon(ic);
                 return lb;
@@ -380,6 +376,16 @@ public class ChatClient extends JFrame implements KeyListener, ActionListener, F
         Image im = javax.imageio.ImageIO.read(f);
         return new ImageIcon(im.getScaledInstance(22, 22, Image.SCALE_SMOOTH)); // 平滑缩放,列表小图标
     }
+    private ImageIcon defaultListIcon;
+    // 列表小头像:有上传头像用它,否则用默认灰人形(不再空白)
+    private ImageIcon listIconFor(String nick) {
+        Object o = avatars.get(nick.toLowerCase());
+        if(o != null) return (ImageIcon)o;
+        if(defaultListIcon == null) {
+            try { defaultListIcon = scaledIcon(avatarFileOf(null)); } catch(Exception e) {}
+        }
+        return defaultListIcon;
+    }
     // 某昵称的头像文件;没有则返回默认头像(灰色人形,首次生成)——供气泡旁显示
     java.io.File avatarFileOf(String nick) {
         if(nick != null) {
@@ -422,6 +428,7 @@ public class ChatClient extends JFrame implements KeyListener, ActionListener, F
             java.awt.image.BufferedImage out = new java.awt.image.BufferedImage(128, 128,
                 java.awt.image.BufferedImage.TYPE_INT_RGB);
             Graphics2D g = out.createGraphics();
+            g.setColor(Color.white); g.fillRect(0, 0, 128, 128); // 先铺白底,透明 PNG 才不会变黑
             g.setRenderingHint(RenderingHints.KEY_INTERPOLATION, RenderingHints.VALUE_INTERPOLATION_BILINEAR);
             g.drawImage(src, 0, 0, 128, 128, null);
             g.dispose();
