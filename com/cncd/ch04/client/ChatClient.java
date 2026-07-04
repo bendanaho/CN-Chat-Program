@@ -50,8 +50,9 @@ public class ChatClient extends JFrame implements KeyListener, ActionListener, F
     JLabel statusBar, typingLabel, peerTitle; // 状态栏/正在输入/右栏标题(对方信息↔群成员)
     long lastTypingSent = 0;            // /typing 节流
     javax.swing.Timer typingClearTimer; // 定时清除"对方正在输入"
-    // 本地聊天记录(功能二十一):每个会话一个文件,重开程序回填
+    // 本地聊天记录(功能二十一):按登录身份隔离,每个昵称一个子目录,每会话一个文件
     final java.io.File historyDir = new java.io.File(System.getProperty("user.home"), ".chattool-history");
+    String historyOwner = "";          // 当前记录归属的身份(=登录昵称);空=未登录,不读写
     ClientKernel ck;
     ClientHistory historyWindow;
     private String lastMsg = "";
@@ -216,21 +217,20 @@ public class ChatClient extends JFrame implements KeyListener, ActionListener, F
         westPanel.setPreferredSize(new Dimension(150, 0));
         this.add(westPanel, BorderLayout.WEST);
         rebuildConvList();
-        loadAllHistory(); // 回填上次的聊天记录(功能二十一)
         applyTheme();     // 启动即按用户上次选择的主题渲染
     }
-    // ===== 本地聊天记录(功能二十一) =====
-    private java.io.File histFile(String conv) {
-        try {
-            String enc = java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(conv.getBytes("UTF-8"));
-            return new java.io.File(historyDir, enc + ".txt"); // Base64 文件名安全承载中文/#等
-        } catch(Exception e) { return new java.io.File(historyDir, "x.txt"); }
+    // ===== 本地聊天记录(功能二十一,按身份隔离) =====
+    private String b64(String s) {
+        try { return java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(s.getBytes("UTF-8")); }
+        catch(Exception e) { return "x"; }
     }
-    // 某会话有新消息/更新时,把它的全部记录重写落盘(会话消息量小,整体重写简单可靠)
+    private java.io.File ownerDir(String owner) { return new java.io.File(historyDir, b64(owner)); }
+    private java.io.File histFile(String conv) { return new java.io.File(ownerDir(historyOwner), b64(conv) + ".txt"); }
+    // 某会话有新消息/更新时,把它的全部记录重写落盘(未登录则不写)
     void saveHistory(String conv, ClientHistory h) {
-        if(conv == null) return;
+        if(conv == null || historyOwner.length() == 0) return;
         try {
-            historyDir.mkdirs();
+            ownerDir(historyOwner).mkdirs();
             String s = h.serialize();
             java.io.File f = histFile(conv);
             if(s.length() == 0) { if(f.exists()) f.delete(); return; }
@@ -239,10 +239,16 @@ public class ChatClient extends JFrame implements KeyListener, ActionListener, F
             w.write(s); w.close();
         } catch(Exception e) {}
     }
-    private void loadAllHistory() {
-        java.io.File[] fs = historyDir.listFiles();
-        if(fs == null) return;
-        for(int i=0;i<fs.length;i++) {
+    // 登录后加载"我这个身份"的历史;身份切换时先清空当前面板再载入
+    private void loadOwnerHistory() {
+        if(myNick.length() == 0 || myNick.equals(historyOwner)) return; // 同身份不重复加载
+        // 切换身份:清空所有会话面板与临时会话,避免上一身份的记录残留
+        Iterator it = convs.values().iterator();
+        while(it.hasNext()) ((ClientHistory)(it.next())).clear();
+        tempConvs.clear();
+        historyOwner = myNick;
+        java.io.File[] fs = ownerDir(historyOwner).listFiles();
+        if(fs != null) for(int i=0;i<fs.length;i++) {
             String fn = fs[i].getName();
             if(!fn.endsWith(".txt")) continue;
             try {
@@ -863,6 +869,7 @@ public class ChatClient extends JFrame implements KeyListener, ActionListener, F
             String nk = str.substring(i + marker.length()).trim();
             txtNick.setText(nk);
             myNick = nk; // 服务器确认的权威昵称,用于消息归属判断
+            loadOwnerHistory(); // 身份确立/切换 → 载入该身份的历史(同身份自动跳过)
             // 昵称确立即拉取自己的信息回填顶部编辑区
             if(ck != null && ck.isConnected()) ck.sendMessage("/infoq " + nk);
         }
@@ -913,6 +920,7 @@ public class ChatClient extends JFrame implements KeyListener, ActionListener, F
             myNick = nickSet ? txtNick.getText().trim() : "" + ck.getLocalPort();
             if(ck.isConnected()) {
                 ck.addClient(this);
+                loadOwnerHistory(); // 载入"我这个身份"的历史(先于本次会话提示)
                 addMsg("<font color=\"" + Theme.OK + "\">connected! Local Port:" + ck.getLocalPort() + "</font>");
                 if(!nickSet) addMsg("提示：昵称框未填写，当前昵称为端口号，可在上方 Nick 框输入名字后回车，或发送 /nick 名字 修改");
             } else {
@@ -941,6 +949,7 @@ public class ChatClient extends JFrame implements KeyListener, ActionListener, F
                         boolean has = n.length() > 0 && !n.equals(ChatClient.nickText);
                         if(has) ck.setNick(n); // 取回原昵称
                         myNick = has ? n : "" + ck.getLocalPort();
+                        loadOwnerHistory(); // 同身份则跳过(不重复加载)
                         try { Thread.sleep(400); } catch(Exception e) {}
                         flushPending();
                         reconnecting = false;
