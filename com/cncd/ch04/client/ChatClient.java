@@ -400,7 +400,8 @@ public class ChatClient extends JFrame implements KeyListener, ActionListener, F
                 rawInfoHtml = html;
                 infoPane.setText(Theme.apply(html));
             }
-        } else if(cmd.startsWith("ROOMS")) {
+        } else if(cmd.equals("ROOMS") || cmd.startsWith("ROOMS ")) {
+            // 精确匹配:否则 "ROOMSYS ..."(以 ROOMS 开头)会被误当成群组列表
             rooms.clear();
             StringTokenizer st = new StringTokenizer(cmd.length() > 5 ? cmd.substring(5) : "");
             while(st.hasMoreTokens()) rooms.add(st.nextToken());
