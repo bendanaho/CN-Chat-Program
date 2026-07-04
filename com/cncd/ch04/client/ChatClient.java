@@ -86,6 +86,7 @@ public class ChatClient extends JFrame implements KeyListener, ActionListener, F
         // 双击在线用户名 → 输入框自动填好私聊命令前缀，光标就位直接打内容
         userList.addMouseListener(new MouseAdapter() {
             public void mouseClicked(MouseEvent e) {
+                if(!SwingUtilities.isLeftMouseButton(e)) return; // 右键交给弹出菜单
                 // 点列表空白处取消选中（选中=文件私发对象，取消=群发）
                 int idx = userList.locationToIndex(e.getPoint());
                 if(idx >= 0 && !userList.getCellBounds(idx, idx).contains(e.getPoint())) {
@@ -100,6 +101,9 @@ public class ChatClient extends JFrame implements KeyListener, ActionListener, F
                     }
                 }
             }
+            // popup trigger 在 Windows 是 released、在部分平台是 pressed，两处都挂
+            public void mousePressed(MouseEvent e) { userMenu(e); }
+            public void mouseReleased(MouseEvent e) { userMenu(e); }
         });
         JPanel eastPanel = new JPanel(new BorderLayout());
         eastPanel.add(new JLabel("在线用户", JLabel.CENTER), BorderLayout.NORTH);
@@ -123,11 +127,14 @@ public class ChatClient extends JFrame implements KeyListener, ActionListener, F
         convList = new JList(convModel);
         convList.addMouseListener(new MouseAdapter() {
             public void mouseClicked(MouseEvent e) {
+                if(!SwingUtilities.isLeftMouseButton(e)) return; // 右键交给弹出菜单
                 int idx = convList.locationToIndex(e.getPoint());
                 if(idx < 0 || idx >= itemNames.size()) return;
                 Object name = itemNames.get(idx);
                 if(name != null) openConv(name.toString()); // 表头行(null)不响应点击
             }
+            public void mousePressed(MouseEvent e) { convMenu(e); }
+            public void mouseReleased(MouseEvent e) { convMenu(e); }
         });
         JScrollPane convScroll = new JScrollPane(convList);
         convScroll.setPreferredSize(new Dimension(150, 0));
@@ -172,6 +179,16 @@ public class ChatClient extends JFrame implements KeyListener, ActionListener, F
                 StringTokenizer st = new StringTokenizer(cmd.substring(7));
                 while(st.hasMoreTokens()) friends.add(st.nextToken());
             }
+            // 已有会话的人被移出好友后归入临时会话，避免从列表上消失
+            Iterator it = convs.keySet().iterator();
+            while(it.hasNext()) {
+                String k = (String)(it.next());
+                if(!MAIN_ROOM.equals(k) && !containsIgnoreCase(friends, k)
+                    && !containsIgnoreCase(tempConvs, k)) tempConvs.add(k);
+            }
+            // 好友关系变化可能影响右栏"加为好友"按钮的显隐
+            if(!MAIN_ROOM.equals(currentConv))
+                buttonAddFriend.setVisible(!containsIgnoreCase(friends, currentConv));
             rebuildConvList();
         } else if(cmd.startsWith("PM ")) {
             String rest = cmd.substring(3);
@@ -216,14 +233,7 @@ public class ChatClient extends JFrame implements KeyListener, ActionListener, F
                 || lower.endsWith(".jpeg") || lower.endsWith(".gif")) {
                 // 聊天区是 HTML 渲染，图片用 <img> 内嵌显示（文档要求⑥）。
                 // 按 240px 上限等比缩小成缩略图，避免大图撑爆聊天区；点链接看原图
-                String size = "";
-                try {
-                    java.awt.image.BufferedImage bi = javax.imageio.ImageIO.read(out);
-                    if(bi != null) {
-                        double sc = Math.min(1.0, 240.0 / Math.max(bi.getWidth(), bi.getHeight()));
-                        size = " width=\"" + (int)(bi.getWidth()*sc) + "\" height=\"" + (int)(bi.getHeight()*sc) + "\"";
-                    }
-                } catch(Exception ig) {}
+                String size = imgSizeAttr(out);
                 appendTo(pane, "<font color=\"#9933cc\">[图片] 来自 " + sender + ": " + fname
                         + "</font>（<a href=\"" + uri + "\">查看原图</a>）<br><img src=\"" + uri + "\"" + size + ">");
             } else if(lower.endsWith(".mp4") || lower.endsWith(".avi") || lower.endsWith(".mkv")
@@ -264,6 +274,7 @@ public class ChatClient extends JFrame implements KeyListener, ActionListener, F
             eastLayout.show(eastCards, "users");
         } else {
             eastLayout.show(eastCards, "info");
+            buttonAddFriend.setVisible(!containsIgnoreCase(friends, name)); // 已是好友就不显示"加为好友"
             infoPane.setText("查询中...");
             if(ck != null && ck.isConnected()) ck.sendMessage("/infoq " + name); // 静默拉取对方信息填右栏
         }
@@ -299,6 +310,81 @@ public class ChatClient extends JFrame implements KeyListener, ActionListener, F
         for(int i=0;i<v.size();i++)
             if(s.equalsIgnoreCase((String)v.get(i))) return true;
         return false;
+    }
+    // 在线用户列表右键菜单：添加好友（已是好友则只有"发起私聊"；自己不弹）
+    private void userMenu(MouseEvent e) {
+        if(!e.isPopupTrigger()) return;
+        int idx = userList.locationToIndex(e.getPoint());
+        if(idx < 0 || !userList.getCellBounds(idx, idx).contains(e.getPoint())) return;
+        userList.setSelectedIndex(idx);
+        final String name = "" + userModel.get(idx);
+        if(name.equalsIgnoreCase(txtNick.getText())) return;
+        JPopupMenu menu = new JPopupMenu();
+        if(!containsIgnoreCase(friends, name)) {
+            JMenuItem add = new JMenuItem("添加好友");
+            add.addActionListener(new ActionListener() {
+                public void actionPerformed(ActionEvent ev) {
+                    if(ck != null && ck.isConnected()) ck.sendMessage("/addfriend " + name);
+                }
+            });
+            menu.add(add);
+        }
+        JMenuItem chat = new JMenuItem("发起私聊");
+        chat.addActionListener(new ActionListener() {
+            public void actionPerformed(ActionEvent ev) { openConv(name); }
+        });
+        menu.add(chat);
+        menu.show(userList, e.getX(), e.getY());
+    }
+    // 会话列表右键菜单：仅好友条目提供"删除好友"
+    private void convMenu(MouseEvent e) {
+        if(!e.isPopupTrigger()) return;
+        int idx = convList.locationToIndex(e.getPoint());
+        if(idx < 0 || idx >= itemNames.size()) return;
+        Object o = itemNames.get(idx);
+        if(o == null) return;
+        final String name = o.toString();
+        if(!containsIgnoreCase(friends, name)) return;
+        convList.setSelectedIndex(idx);
+        JPopupMenu menu = new JPopupMenu();
+        JMenuItem del = new JMenuItem("删除好友");
+        del.addActionListener(new ActionListener() {
+            public void actionPerformed(ActionEvent ev) {
+                if(ck != null && ck.isConnected()) ck.sendMessage("/delfriend " + name);
+            }
+        });
+        menu.add(del);
+        menu.show(convList, e.getX(), e.getY());
+    }
+    // 计算 <img> 的等比缩略尺寸属性（240px 上限）；发送与接收两侧共用
+    private String imgSizeAttr(java.io.File imgFile) {
+        try {
+            java.awt.image.BufferedImage bi = javax.imageio.ImageIO.read(imgFile);
+            if(bi != null) {
+                double sc = Math.min(1.0, 240.0 / Math.max(bi.getWidth(), bi.getHeight()));
+                return " width=\"" + (int)(bi.getWidth()*sc) + "\" height=\"" + (int)(bi.getHeight()*sc) + "\"";
+            }
+        } catch(Exception ig) {}
+        return "";
+    }
+    // 自己发出的图片/视频/文件在本端同样可查看：直接引用本地原文件展示（无需等对方转发）
+    void showSentFile(String target, java.io.File f, String fname) {
+        String pane = "*".equals(target) ? MAIN_ROOM : target;
+        String uri = "" + f.toURI();
+        String head = "<font color=\"#888888\">我" + ("*".equals(target) ? "(群发)" : "") + ": </font>";
+        String lower = fname.toLowerCase();
+        if(lower.endsWith(".png") || lower.endsWith(".jpg")
+            || lower.endsWith(".jpeg") || lower.endsWith(".gif")) {
+            appendTo(pane, head + "<font color=\"#9933cc\">[图片] " + fname
+                    + "</font>（<a href=\"" + uri + "\">查看原图</a>）<br><img src=\"" + uri + "\"" + imgSizeAttr(f) + ">");
+        } else if(lower.endsWith(".mp4") || lower.endsWith(".avi") || lower.endsWith(".mkv")
+            || lower.endsWith(".mov") || lower.endsWith(".wmv")) {
+            appendTo(pane, head + "<font color=\"#9933cc\">[视频] " + fname
+                    + "（<a href=\"" + uri + "\">点击播放</a>）</font>");
+        } else {
+            appendTo(pane, head + "<font color=\"#9933cc\">[文件] " + fname
+                    + "（<a href=\"" + uri + "\">打开</a>）</font>");
+        }
     }
     // 渲染 USERINFO 推送到右侧信息栏，格式："用户 字段: 值|字段: 值"
     private void showUserInfo(String rest) {
@@ -413,6 +499,7 @@ public class ChatClient extends JFrame implements KeyListener, ActionListener, F
             String b64 = Base64.getEncoder().encodeToString(data);
             String fname = f.getName().replace(' ', '_'); // 协议按空格分隔字段，文件名里的空格转下划线
             ck.sendFile(target, fname, b64);
+            showSentFile(target, f, fname); // 自己这端也立刻可见/可打开(引用本地原文件)
         } catch(Exception ex) {
             addMsg("<font color=\"#ff0000\">读取文件失败: " + ex.getMessage() + "</font>");
         }
