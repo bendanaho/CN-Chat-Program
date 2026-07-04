@@ -68,6 +68,9 @@ public class ChatClient extends JFrame implements KeyListener, ActionListener, F
     java.awt.TrayIcon trayIcon;
     // 表情(功能二十六)
     JButton buttonEmote;
+    // 注册/登录(账号体系 UI 化)
+    JButton buttonRegister;
+    boolean awaitingVerify = false; // 已发 /nick 到注册名,正等服务器要求验证
     ClientKernel ck;
     ClientHistory historyWindow;
     private String lastMsg = "";
@@ -80,17 +83,23 @@ public class ChatClient extends JFrame implements KeyListener, ActionListener, F
     public void uiInit() {
         setLayout(new BorderLayout());
         //创建North:左=连接区(带标题框),中=个人资料表格,右=醒目的主题切换按钮
-        JPanel connPanel = new JPanel(new GridLayout(0,2,4,4));
-        connPanel.setBorder(titled("连接"));
-        connPanel.add(new JLabel(" 服务器:"));
-        connPanel.add(txtHost = new JTextField(ChatClient.serverText));
-        connPanel.add(new JLabel(" 端口:"));
-        connPanel.add(txtPort = new JTextField(ChatClient.portText));
-        connPanel.add(new JLabel(" 昵称:"));
-        connPanel.add(txtNick = new JTextField(ChatClient.nickText));
-        connPanel.add(buttonScan = new JButton("扫描局域网"));
-        connPanel.add(buttonConnect = new JButton("连接"));
-        connPanel.setPreferredSize(new Dimension(280, 0));
+        JPanel connFields = new JPanel(new GridLayout(0,2,4,4));
+        connFields.add(new JLabel(" 服务器:"));
+        connFields.add(txtHost = new JTextField(ChatClient.serverText));
+        connFields.add(new JLabel(" 端口:"));
+        connFields.add(txtPort = new JTextField(ChatClient.portText));
+        connFields.add(new JLabel(" 昵称:"));
+        connFields.add(txtNick = new JTextField(ChatClient.nickText));
+        JPanel connBtns = new JPanel(new GridLayout(1,0,4,4));
+        connBtns.add(buttonScan = new JButton("扫描局域网"));
+        connBtns.add(buttonConnect = new JButton("连接"));
+        connBtns.add(buttonRegister = new JButton("注册"));
+        buttonRegister.addActionListener(this);
+        JPanel connPanel = new JPanel(new BorderLayout(0,4));
+        connPanel.setBorder(titled("连接 / 注册"));
+        connPanel.add(connFields, BorderLayout.CENTER);
+        connPanel.add(connBtns, BorderLayout.SOUTH);
+        connPanel.setPreferredSize(new Dimension(300, 0));
         // 个人资料:字段/内容两列的可编辑表格(功能五 UI 化)
         infoModel = new DefaultTableModel(new Object[]{"字段","内容"}, 0);
         infoTable = new JTable(infoModel);
@@ -665,11 +674,27 @@ public class ChatClient extends JFrame implements KeyListener, ActionListener, F
         }
         appendTo(MAIN_ROOM, str); // 普通广播与系统提示都属于公共聊天室
         syncNick(str);
+        // 注册成功 = 以该名登录:更新权威昵称、载入该身份历史(此消息不含"known as",syncNick 不覆盖)
+        if(str.indexOf("is now registered and set as your own") >= 0 && str.startsWith("User ")) {
+            int b = str.indexOf(" is now registered");
+            if(b > 5) {
+                myNick = str.substring(5, b);
+                txtNick.setText(myNick);
+                loadOwnerHistory();
+                if(ck != null && ck.isConnected()) ck.sendMessage("/infoq " + myNick);
+            }
+        }
         // 自动重连取回注册昵称:服务器要求验证且缓存过密码 → 自动 /verify(功能十一)
-        if(str.indexOf("is registered so you have to verify") >= 0
-            && lastPassword != null && ck != null && ck.isConnected()) {
-            ck.sendMessage("/verify " + lastPassword);
-            appendTo(MAIN_ROOM, "<font color=\"" + Theme.SELF + "\">已用缓存的密码自动验证身份...</font>");
+        if(str.indexOf("is registered so you have to verify") >= 0 && ck != null && ck.isConnected()) {
+            if(lastPassword != null) { // 有缓存密码(如自动重连)→ 直接验证
+                ck.sendMessage("/verify " + lastPassword);
+                appendTo(MAIN_ROOM, "<font color=\"" + Theme.SELF + "\">已用缓存的密码自动验证身份...</font>");
+            } else { // 无缓存 → 弹密码框登录
+                String nk = txtNick.getText().trim();
+                int a = str.indexOf("Nick ");
+                if(a == 0) { int b = str.indexOf(" is registered"); if(b > 5) nk = str.substring(5, b); }
+                promptVerify(nk);
+            }
         }
     }
     // 处理服务器主动推送：USERLIST 在线名单 / FRIENDS 好友名单 / PM,PMSENT 私聊 /
@@ -861,6 +886,50 @@ public class ChatClient extends JFrame implements KeyListener, ActionListener, F
     private void recallEverywhere(String key, String who) {
         Iterator it = convs.values().iterator();
         while(it.hasNext()) ((ClientHistory)(it.next())).recall(key, who);
+    }
+    // ===== 注册 / 登录界面(账号体系 UI 化) =====
+    // 弹框填用户名+密码 → 未连接则先连,再发 /register(注册即以该名登录)
+    private void doRegister() {
+        JTextField u = new JTextField(txtNick.getText().equals(ChatClient.nickText) ? "" : txtNick.getText());
+        JPasswordField p = new JPasswordField();
+        JPanel form = new JPanel(new GridLayout(0,1,2,2));
+        form.add(new JLabel("用户名(至少4个字符):"));
+        form.add(u);
+        form.add(new JLabel("密码(至少4个字符):"));
+        form.add(p);
+        int r = JOptionPane.showConfirmDialog(this, form, "注册账号", JOptionPane.OK_CANCEL_OPTION, JOptionPane.PLAIN_MESSAGE);
+        if(r != JOptionPane.OK_OPTION) return;
+        String name = u.getText().trim();
+        String pass = new String(p.getPassword()).trim();
+        if(name.length() < 4 || pass.length() < 4) {
+            JOptionPane.showMessageDialog(this, "用户名和密码都需至少 4 个字符"); return;
+        }
+        // 未连接先连接(以默认端口号昵称进,再注册改名)
+        if(ck == null || !ck.isConnected()) {
+            try {
+                ck = new ClientKernel(txtHost.getText(), Integer.parseInt(txtPort.getText()));
+                if(!ck.isConnected()) { addMsg("<font color=\"" + Theme.ERR + "\">连接失败</font>"); return; }
+                ck.addClient(this);
+                myNick = "" + ck.getLocalPort();
+                loadOwnerHistory();
+            } catch(Exception ex) { addMsg("<font color=\"" + Theme.ERR + "\">连接失败: " + ex.getMessage() + "</font>"); return; }
+        }
+        txtNick.setText(name);
+        lastPassword = pass;              // 缓存,断线重连自动验证
+        ck.sendMessage("/register " + name + " " + pass);
+    }
+    // 输入已注册昵称连接后,服务器要求验证时:自动弹密码框(账号"登录"体验)
+    private void promptVerify(final String nick) {
+        SwingUtilities.invokeLater(new Runnable() { public void run() {
+            JPasswordField p = new JPasswordField();
+            int r = JOptionPane.showConfirmDialog(ChatClient.this, p,
+                "昵称 " + nick + " 已注册,请输入密码登录", JOptionPane.OK_CANCEL_OPTION, JOptionPane.PLAIN_MESSAGE);
+            if(r == JOptionPane.OK_OPTION && ck != null && ck.isConnected()) {
+                String pass = new String(p.getPassword()).trim();
+                lastPassword = pass;
+                ck.sendMessage("/verify " + pass);
+            }
+        }});
     }
     // 加入/创建群组(功能十七)
     private void joinRoom() {
@@ -1406,6 +1475,7 @@ public class ChatClient extends JFrame implements KeyListener, ActionListener, F
         if(e.getSource()==buttonSaveInfo) saveMyInfo();
         if(e.getSource()==buttonAvatar) chooseAvatar();
         if(e.getSource()==buttonEmote) showEmoteMenu();
+        if(e.getSource()==buttonRegister) doRegister();
         if(e.getSource()==buttonAddFriend && !MAIN_ROOM.equals(currentConv)
             && ck != null && ck.isConnected())
             ck.sendMessage("/addfriend " + currentConv); // 右栏一键加好友，回执进公共聊天室

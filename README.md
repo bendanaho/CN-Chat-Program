@@ -34,6 +34,8 @@ java -cp out com.cncd.ch04.server.MainServer 3500
 java -cp out com.cncd.ch04.client.ChatClient
 ```
 
+账号:未注册的昵称直接输入即用(临时/游客,免密);点连接区**"注册"**按钮可把昵称注册成自己的(用户名/密码各≥4字符,MD5 存储);之后输入已注册的昵称连接会**自动弹密码框登录**,验证通过才能使用该昵称。
+
 客户端连接后常用命令:`/nick 名字`、`/users`、`/msg 名字 内容`、`/register 名字 密码`、`/setinfo 字段 内容`、`/getinfo [用户]`、`/addfriend 名字`、`/friends`;发文件/图片用界面上的"文件"按钮(右侧列表选中=私发,不选=群发)。
 
 ## 局域网多机部署
