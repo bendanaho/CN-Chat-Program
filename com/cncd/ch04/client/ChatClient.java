@@ -15,6 +15,21 @@ public class ChatClient extends JFrame implements KeyListener, ActionListener, F
     JScrollPane sc;
     JList userList;
     DefaultListModel userModel;
+    // ===== 会话式界面（仿 QQ）：左侧会话列表，中部按会话切换聊天窗格，右侧随会话显示在线用户/对方信息 =====
+    static final String MAIN_ROOM = "公共聊天室";
+    JList convList;
+    DefaultListModel convModel;
+    JPanel centerCards, eastCards;
+    CardLayout centerLayout, eastLayout;
+    JEditorPane infoPane;
+    JButton buttonAddFriend;
+    HashMap convs = new HashMap();     // 会话名 -> 聊天窗格
+    Vector itemNames = new Vector();   // 左侧列表行号 -> 会话名（表头行为 null）
+    Vector friends = new Vector();     // 我的好友（服务器 FRIENDS 推送）
+    Vector online = new Vector();      // 在线用户（服务器 USERLIST 推送）
+    Vector tempConvs = new Vector();   // 陌生人临时会话
+    HashSet unread = new HashSet();    // 有未读消息的会话
+    String currentConv = MAIN_ROOM;
     ClientKernel ck;
     ClientHistory historyWindow;
     private String lastMsg = "";
@@ -56,11 +71,15 @@ public class ChatClient extends JFrame implements KeyListener, ActionListener, F
         buttonFile.addActionListener(this);
         msgWindow.addKeyListener(this);
         add(southPanel, BorderLayout.SOUTH);
-        //创建Center
-        historyWindow = new ClientHistory();
+        //创建Center：CardLayout，每个会话一个独立聊天窗格
+        centerLayout = new CardLayout();
+        centerCards = new JPanel(centerLayout);
+        historyWindow = new ClientHistory(); // 公共聊天室窗格
+        convs.put(MAIN_ROOM, historyWindow);
         sc = new JScrollPane(historyWindow);
         sc.setAutoscrolls(true);
-        this.add(sc, BorderLayout.CENTER);
+        centerCards.add(sc, MAIN_ROOM);
+        this.add(centerCards, BorderLayout.CENTER);
         //创建East：在线用户列表（服务器推送，实时刷新）
         userModel = new DefaultListModel();
         userList = new JList(userModel);
@@ -76,24 +95,49 @@ public class ChatClient extends JFrame implements KeyListener, ActionListener, F
                 if(e.getClickCount() == 2) {
                     Object v = userList.getSelectedValue();
                     if(v != null) {
-                        if(v.toString().equalsIgnoreCase(txtNick.getText())) return; // 自己不预填(服务器端也会拦)
-                        msgWindow.setText("/msg " + v + " ");
-                        msgWindow.requestFocus();
+                        if(v.toString().equalsIgnoreCase(txtNick.getText())) return; // 不能和自己开会话
+                        openConv(v.toString()); // 双击在线用户 → 打开/切换到与他的私聊会话
                     }
                 }
             }
         });
         JPanel eastPanel = new JPanel(new BorderLayout());
         eastPanel.add(new JLabel("在线用户", JLabel.CENTER), BorderLayout.NORTH);
-        JScrollPane userScroll = new JScrollPane(userList);
-        userScroll.setPreferredSize(new Dimension(110, 0));
-        eastPanel.add(userScroll, BorderLayout.CENTER);
-        this.add(eastPanel, BorderLayout.EAST);
+        eastPanel.add(new JScrollPane(userList), BorderLayout.CENTER);
+        //East 用 CardLayout：公共聊天室显示在线用户，私聊会话显示对方信息
+        JPanel infoPanel = new JPanel(new BorderLayout());
+        infoPanel.add(new JLabel("对方信息", JLabel.CENTER), BorderLayout.NORTH);
+        infoPane = new JEditorPane("text/html", "");
+        infoPane.setEditable(false);
+        infoPanel.add(new JScrollPane(infoPane), BorderLayout.CENTER);
+        infoPanel.add(buttonAddFriend = new JButton("加为好友"), BorderLayout.SOUTH);
+        buttonAddFriend.addActionListener(this);
+        eastLayout = new CardLayout();
+        eastCards = new JPanel(eastLayout);
+        eastCards.add(eastPanel, "users");
+        eastCards.add(infoPanel, "info");
+        eastCards.setPreferredSize(new Dimension(140, 0));
+        this.add(eastCards, BorderLayout.EAST);
+        //创建West：会话列表（公共聊天室 / 好友 / 临时会话）
+        convModel = new DefaultListModel();
+        convList = new JList(convModel);
+        convList.addMouseListener(new MouseAdapter() {
+            public void mouseClicked(MouseEvent e) {
+                int idx = convList.locationToIndex(e.getPoint());
+                if(idx < 0 || idx >= itemNames.size()) return;
+                Object name = itemNames.get(idx);
+                if(name != null) openConv(name.toString()); // 表头行(null)不响应点击
+            }
+        });
+        JScrollPane convScroll = new JScrollPane(convList);
+        convScroll.setPreferredSize(new Dimension(150, 0));
+        this.add(convScroll, BorderLayout.WEST);
+        rebuildConvList();
     }
    public static void main(String args[]) {
         ChatClient client = new ChatClient();
         client.setTitle(client.appName);
-        client.setSize(450, 500);
+        client.setSize(800, 540);
         client.setLocation(100,100);
         client.setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
         client.setVisible(true);
@@ -106,26 +150,58 @@ public class ChatClient extends JFrame implements KeyListener, ActionListener, F
             handlePush(str.substring(1));
             return;
         }
-        historyWindow.addText(str);
+        appendTo(MAIN_ROOM, str); // 普通广播与系统提示都属于公共聊天室
         syncNick(str);
     }
-    // 处理服务器主动推送："USERLIST 名字..." 在线名单 / "FILE 发送者 文件名 Base64" 文件
+    // 处理服务器主动推送：USERLIST 在线名单 / FRIENDS 好友名单 / PM,PMSENT 私聊 /
+    // FILE 群发文件 / FILEP 私发文件 / USERINFO 个人信息
     private void handlePush(String cmd) {
         if(cmd.startsWith("USERLIST")) {
             userModel.clear();
+            online.clear();
             StringTokenizer st = new StringTokenizer(cmd.substring(8));
-            while(st.hasMoreTokens()) userModel.addElement(st.nextToken());
+            while(st.hasMoreTokens()) {
+                String u = st.nextToken();
+                userModel.addElement(u);
+                online.add(u);
+            }
+            rebuildConvList(); // 好友的在线/离线标记随之刷新
+        } else if(cmd.startsWith("FRIENDS")) {
+            friends.clear();
+            if(cmd.length() > 7) {
+                StringTokenizer st = new StringTokenizer(cmd.substring(7));
+                while(st.hasMoreTokens()) friends.add(st.nextToken());
+            }
+            rebuildConvList();
+        } else if(cmd.startsWith("PM ")) {
+            String rest = cmd.substring(3);
+            int p = rest.indexOf(' ');
+            if(p < 0) return;
+            // 对方发来的私聊 → 路由进与发送者的会话窗格
+            appendTo(rest.substring(0, p), rest.substring(0, p) + ": " + rest.substring(p + 1));
+        } else if(cmd.startsWith("PMSENT ")) {
+            String rest = cmd.substring(7);
+            int p = rest.indexOf(' ');
+            if(p < 0) return;
+            // 我发出的私聊回显 → 同一会话窗格,灰色区分
+            appendTo(rest.substring(0, p), "<font color=\"#888888\">我: " + rest.substring(p + 1) + "</font>");
+        } else if(cmd.startsWith("FILEP ")) {
+            receiveFile(cmd.substring(6), null); // null=按发送者路由进私聊会话
         } else if(cmd.startsWith("FILE ")) {
-            receiveFile(cmd.substring(5));
+            receiveFile(cmd.substring(5), MAIN_ROOM); // 群发文件进公共聊天室
+        } else if(cmd.startsWith("USERINFO ")) {
+            showUserInfo(cmd.substring(9));
         }
     }
-    // 接收文件：解码 Base64 存到 用户主目录\ChatDownloads\，图片直接内嵌显示在聊天区
-    private void receiveFile(String rest) {
+    // 接收文件：解码 Base64 存到 用户主目录\ChatDownloads\，图片内嵌显示。
+    // route=目标会话窗格；传 null 表示私发文件，按发送者路由进对应私聊会话
+    private void receiveFile(String rest, String route) {
         try {
             int p1 = rest.indexOf(' ');
             int p2 = rest.indexOf(' ', p1 + 1);
             if(p1 < 0 || p2 < 0) return;
             String sender = rest.substring(0, p1);
+            String pane = (route == null) ? sender : route;
             // 文件名来自网络，剥掉路径分隔符防止目录穿越（如 ..\evil.exe 写到别处）
             String fname = rest.substring(p1 + 1, p2).replace('\\', '_').replace('/', '_');
             byte[] data = Base64.getDecoder().decode(rest.substring(p2 + 1));
@@ -148,20 +224,96 @@ public class ChatClient extends JFrame implements KeyListener, ActionListener, F
                         size = " width=\"" + (int)(bi.getWidth()*sc) + "\" height=\"" + (int)(bi.getHeight()*sc) + "\"";
                     }
                 } catch(Exception ig) {}
-                addMsg("<font color=\"#9933cc\">[图片] 来自 " + sender + ": " + fname
+                appendTo(pane, "<font color=\"#9933cc\">[图片] 来自 " + sender + ": " + fname
                         + "</font>（<a href=\"" + uri + "\">查看原图</a>）<br><img src=\"" + uri + "\"" + size + ">");
             } else if(lower.endsWith(".mp4") || lower.endsWith(".avi") || lower.endsWith(".mkv")
                 || lower.endsWith(".mov") || lower.endsWith(".wmv")) {
                 // 视频不做内嵌播放（JEditorPane 无 video 能力），点击调系统默认播放器
-                addMsg("<font color=\"#9933cc\">[视频] 来自 " + sender + ": " + fname
+                appendTo(pane, "<font color=\"#9933cc\">[视频] 来自 " + sender + ": " + fname
                         + "（已保存，<a href=\"" + uri + "\">点击播放</a>）</font>");
             } else {
-                addMsg("<font color=\"#9933cc\">[文件] 来自 " + sender + ": " + fname
+                appendTo(pane, "<font color=\"#9933cc\">[文件] 来自 " + sender + ": " + fname
                         + "（已保存到 " + out.getAbsolutePath() + "，<a href=\"" + uri + "\">打开</a>）</font>");
             }
         } catch(Exception ex) {
-            addMsg("<font color=\"#ff0000\">接收文件失败: " + ex.getMessage() + "</font>");
+            appendTo(MAIN_ROOM, "<font color=\"#ff0000\">接收文件失败: " + ex.getMessage() + "</font>");
         }
+    }
+    // ===== 会话管理 =====
+    private ClientHistory ensureConv(String name) {
+        ClientHistory h = (ClientHistory)convs.get(name);
+        if(h == null) {
+            h = new ClientHistory();
+            convs.put(name, h);
+            centerCards.add(new JScrollPane(h), name);
+            if(!containsIgnoreCase(friends, name)) tempConvs.add(name); // 非好友归入临时会话分组
+            rebuildConvList();
+        }
+        return h;
+    }
+    private void appendTo(String conv, String html) {
+        ensureConv(conv).addText(html);
+        if(!conv.equals(currentConv)) { unread.add(conv); rebuildConvList(); } // 非当前会话标未读
+    }
+    void openConv(String name) {
+        currentConv = name;
+        ensureConv(name);
+        unread.remove(name);
+        centerLayout.show(centerCards, name);
+        if(MAIN_ROOM.equals(name)) {
+            eastLayout.show(eastCards, "users");
+        } else {
+            eastLayout.show(eastCards, "info");
+            infoPane.setText("查询中...");
+            if(ck != null && ck.isConnected()) ck.sendMessage("/infoq " + name); // 静默拉取对方信息填右栏
+        }
+        rebuildConvList();
+        msgWindow.requestFocus();
+    }
+    // 重建左侧会话列表：公共聊天室 / 好友(带在线标记) / 临时会话；未读会话加 ● 前缀
+    private void rebuildConvList() {
+        if(convModel == null) return;
+        convModel.clear();
+        itemNames.clear();
+        addConvItem(MAIN_ROOM, MAIN_ROOM);
+        addConvItem("── 好友 ──", null);
+        for(int i=0;i<friends.size();i++) {
+            String f = (String)friends.get(i);
+            addConvItem(f + (containsIgnoreCase(online, f) ? " [在线]" : " [离线]"), f);
+        }
+        boolean headerAdded = false;
+        for(int i=0;i<tempConvs.size();i++) {
+            String t = (String)tempConvs.get(i);
+            if(containsIgnoreCase(friends, t)) continue; // 已加为好友的会话不再算"临时"
+            if(!headerAdded) { addConvItem("── 临时会话 ──", null); headerAdded = true; }
+            addConvItem(t, t);
+        }
+        int cur = itemNames.indexOf(currentConv);
+        if(cur >= 0) convList.setSelectedIndex(cur);
+    }
+    private void addConvItem(String display, String name) {
+        convModel.addElement((name != null && unread.contains(name) ? "● " : "") + display);
+        itemNames.add(name);
+    }
+    private boolean containsIgnoreCase(Vector v, String s) {
+        for(int i=0;i<v.size();i++)
+            if(s.equalsIgnoreCase((String)v.get(i))) return true;
+        return false;
+    }
+    // 渲染 USERINFO 推送到右侧信息栏，格式："用户 字段: 值|字段: 值"
+    private void showUserInfo(String rest) {
+        int p = rest.indexOf(' ');
+        String user = (p < 0) ? rest : rest.substring(0, p);
+        if(MAIN_ROOM.equals(currentConv) || !user.equalsIgnoreCase(currentConv)) return; // 只更新当前会话对象
+        String html = "<b>" + user + "</b><br>";
+        html += containsIgnoreCase(online, user) ? "<font color=\"#00aa00\">[在线]</font><br>"
+                                                 : "<font color=\"#888888\">[离线]</font><br>";
+        if(p < 0) html += "<br>暂无个人信息";
+        else {
+            StringTokenizer st = new StringTokenizer(rest.substring(p + 1), "|");
+            while(st.hasMoreTokens()) html += "<br>" + st.nextToken();
+        }
+        infoPane.setText(html);
     }
     // 收到服务器改名成功回执时，把最新昵称同步到顶部 Nick 框。
     // 只认以 "Server:" 开头的消息：聊天广播都带 "昵称:" 前缀，不会被别人发的内容伪造
@@ -194,7 +346,12 @@ public class ChatClient extends JFrame implements KeyListener, ActionListener, F
             return;
         }
         String toSend = msgWindow.getText();
-        ck.sendMessage(toSend);
+        if(toSend == null || toSend.trim().length() == 0) return;
+        // 会话感知：私聊会话里输入的普通文字自动转为 /msg 对方 内容；命令(/开头)原样发
+        if(!MAIN_ROOM.equals(currentConv) && !toSend.startsWith("/"))
+            ck.sendMessage("/msg " + currentConv + " " + toSend);
+        else
+            ck.sendMessage(toSend);
         lastMsg = "" + toSend;
         msgWindow.setText("");
     }
@@ -222,6 +379,9 @@ public class ChatClient extends JFrame implements KeyListener, ActionListener, F
         if(e.getSource()==buttonConnect) connect();
         if(e.getSource()==buttonSend) send();
         if(e.getSource()==buttonFile) sendFile();
+        if(e.getSource()==buttonAddFriend && !MAIN_ROOM.equals(currentConv)
+            && ck != null && ck.isConnected())
+            ck.sendMessage("/addfriend " + currentConv); // 右栏一键加好友，回执进公共聊天室
     }
     // 发送文件/图片：右侧选中了人=私发给他，没选人=群发给所有人
     private void sendFile() {
@@ -229,9 +389,15 @@ public class ChatClient extends JFrame implements KeyListener, ActionListener, F
             addMsg("<font color=\"#ff0000\">尚未连接服务器，请先点击 Connect</font>");
             return;
         }
-        Object sel = userList.getSelectedValue();
-        String target = (sel == null) ? "*" : sel.toString();
-        if(sel != null && target.equalsIgnoreCase(txtNick.getText())) {
+        // 私聊会话里发文件=发给会话对方；公共聊天室里按右侧选中（无选中=群发）
+        String target;
+        if(!MAIN_ROOM.equals(currentConv)) {
+            target = currentConv;
+        } else {
+            Object sel = userList.getSelectedValue();
+            target = (sel == null) ? "*" : sel.toString();
+        }
+        if(target.equalsIgnoreCase(txtNick.getText())) {
             addMsg("不能给自己发文件，请选择其他用户，或取消选择进行群发");
             return;
         }

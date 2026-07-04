@@ -17,6 +17,7 @@ public class BroadcastCommandParser implements CommandParser {
     private final String DELFRIEND = "delfriend";
     private final String FRIENDS = "friends";
     private final String FILE = "file";
+    private final String INFOQ = "infoq"; // 静默查询个人信息：只回机器可读推送，供界面侧栏自动拉取
     private final String FRIEND_FIELD = "friends"; // 好友名单在 DataSource 中的保留字段名
         private final String tab = "&nbsp;&nbsp;&nbsp;";
     private DataSource ds;
@@ -66,6 +67,8 @@ public class BroadcastCommandParser implements CommandParser {
                     listFriends(cc);
                 else if(command.equalsIgnoreCase(FILE))
                     fileTransfer(cc, strTok);
+                else if(command.equalsIgnoreCase(INFOQ))
+                    pushUserInfo(cc, strTok.hasMoreTokens() ? strTok.nextToken() : cc.nick);
             }
         } catch(Exception e) {
             System.out.println("CommandParser: " + e.getMessage());
@@ -117,11 +120,12 @@ public class BroadcastCommandParser implements CommandParser {
             cc.sendMessage("不能私聊自己");
             return;
         }
-        // 私聊消息加紫色 [私聊] 标记与群聊区分；发送者仅在对方存在时收到回显
-        // （sendTo 找不到人时已给发送者发 "Unable to find user"，此时不能再回显）
-        boolean found = cc.sendTo(user, "<font color=\"#9933cc\">[私聊] " + cc.nick + ": " + body + "</font>");
+        // 私聊改为机器可读推送：接收方 0x01 PM 发送者 正文，发送方回显 0x01 PMSENT 目标 正文，
+        // 客户端据此把消息路由进对应的会话窗格（会话式界面）。
+        // 发送者仅在对方存在时收到回显（sendTo 找不到人时已发 "Unable to find user"）
+        boolean found = cc.sendTo(user, "" + MainServer.PUSHMARKER + "PM " + cc.nick + " " + body);
         if(found)
-            cc.sendMessage("<font color=\"#9933cc\">[私聊→" + user + "] " + body + "</font>");
+            cc.sendMessage("" + MainServer.PUSHMARKER + "PMSENT " + user + " " + body);
     }
     private  void users(ConnectedClient cc) {
         LinkedList users = (LinkedList)((cc.getConnectionKeeper().users()).clone());
@@ -144,6 +148,7 @@ public class BroadcastCommandParser implements CommandParser {
                 cc.sendMessage("Server: You are now known as " + str);
                 cc.getConnectionKeeper().broadcastUserList();
                 if(!str.equalsIgnoreCase(oldNick)) notifyFriendOnline(cc); // 同名重设不重复提醒
+                pushFriends(cc); // 昵称确立后下发自己的好友名单，供界面侧栏分组
             } else
                 cc.sendMessage("nick " + str + " was allready taken");
             
@@ -179,6 +184,7 @@ public class BroadcastCommandParser implements CommandParser {
                 cc.verifyedBoolean = true;
                 cc.getConnectionKeeper().broadcastUserList();
                 notifyFriendOnline(cc);
+                pushFriends(cc);
             } else {
                 cc.sendMessage("The username is allready taken");
             }
@@ -192,6 +198,7 @@ public class BroadcastCommandParser implements CommandParser {
             cc.verifyedBoolean = true;
             cc.sendMessage("Server: nick verified, you are now known as " + cc.nick);
             notifyFriendOnline(cc);
+            pushFriends(cc);
         } else {
             cc.nick = "" + cc.portNumber;
             cc.sendMessage("Invalid user/pass, your nick is set to " + cc.nick);
@@ -234,6 +241,21 @@ public class BroadcastCommandParser implements CommandParser {
             for(int i=0;i<info.length;i++) m += tab + info[i] + "<br>";
             cc.sendMessage(m);
         }
+        pushUserInfo(cc, target); // 同步给界面侧栏一份机器可读版本
+    }
+    // 推送格式：0x01 USERINFO <用户> <字段: 值|字段: 值|...>（无信息时只有用户名）
+    private void pushUserInfo(ConnectedClient cc, String target) {
+        String[] info = ds.getAllUserInfo(target);
+        StringBuffer sb = new StringBuffer();
+        sb.append(MainServer.PUSHMARKER).append("USERINFO ").append(target);
+        for(int i=0;i<info.length;i++)
+            sb.append(i==0 ? " " : "|").append(info[i]);
+        cc.sendMessage(sb.toString());
+    }
+    // 推送格式：0x01 FRIENDS <名字 名字 ...>（无好友时只有 FRIENDS）
+    private void pushFriends(ConnectedClient cc) {
+        String cur = ds.getInfo(cc.nick, FRIEND_FIELD);
+        cc.sendMessage("" + MainServer.PUSHMARKER + "FRIENDS" + (cur == null ? "" : " " + cur));
     }
     private void delInfo(ConnectedClient cc, StringTokenizer strTok) {
         if(!strTok.hasMoreTokens()) { cc.sendMessage("usage: /delinfo <字段>"); return; }
@@ -255,6 +277,7 @@ public class BroadcastCommandParser implements CommandParser {
         if(containsToken(cur, name)) { cc.sendMessage(name + " 已经在你的好友列表中"); return; }
         ds.addInfo(cc.nick, FRIEND_FIELD, (cur == null) ? name : cur + " " + name);
         cc.sendMessage("已添加好友 " + name + (isOnline(cc, name) ? "（当前在线）" : "（当前不在线，上线时会提醒你）"));
+        pushFriends(cc);
     }
     private void delFriend(ConnectedClient cc, StringTokenizer strTok) {
         if(!strTok.hasMoreTokens()) { cc.sendMessage("usage: /delfriend <昵称>"); return; }
@@ -272,6 +295,7 @@ public class BroadcastCommandParser implements CommandParser {
         if(sb.length() == 0) ds.removeInfo(cc.nick, FRIEND_FIELD, null);
         else ds.addInfo(cc.nick, FRIEND_FIELD, sb.toString());
         cc.sendMessage("已删除好友 " + name);
+        pushFriends(cc);
     }
     private void listFriends(ConnectedClient cc) {
         String cur = ds.getInfo(cc.nick, FRIEND_FIELD);
@@ -317,8 +341,9 @@ public class BroadcastCommandParser implements CommandParser {
         String fname = strTok.nextToken();
         if(!strTok.hasMoreTokens()) { cc.sendMessage("usage: /file <user|*> <filename> <base64>"); return; }
         String b64 = strTok.nextToken();
-        String push = "" + MainServer.PUSHMARKER + "FILE " + cc.nick + " " + fname + " " + b64;
         if(target.equals("*")) {
+            // 群发用 FILE 推送（客户端路由进公共聊天室）
+            String push = "" + MainServer.PUSHMARKER + "FILE " + cc.nick + " " + fname + " " + b64;
             LinkedList users = cc.getConnectionKeeper().users();
             Iterator it = users.iterator();
             int n = 0;
@@ -332,8 +357,10 @@ public class BroadcastCommandParser implements CommandParser {
         } else if(target.equalsIgnoreCase(cc.nick)) {
             cc.sendMessage("不能给自己发文件");
         } else {
+            // 私发用 FILEP 推送（客户端路由进与发送者的私聊会话），回执走 PMSENT 进同一会话
+            String push = "" + MainServer.PUSHMARKER + "FILEP " + cc.nick + " " + fname + " " + b64;
             if(cc.sendTo(target, push))
-                cc.sendMessage("<font color=\"#9933cc\">[文件→" + target + "] " + fname + " 已发送</font>");
+                cc.sendMessage("" + MainServer.PUSHMARKER + "PMSENT " + target + " [文件] " + fname + " 已发送");
         }
     }
 }
