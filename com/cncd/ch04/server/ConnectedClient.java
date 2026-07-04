@@ -16,6 +16,7 @@ public class ConnectedClient {
     private Socket sock;
     public boolean printMsg = false;
     public volatile long lastHeard = System.currentTimeMillis(); // 最近一次收到该客户端消息的时刻(心跳清扫用)
+    public boolean entered = MainServer.ENTRYPASS.length() == 0;  // 准入(功能十八):无口令则默认已准入
     public ConnectedClient(Socket sock, ConnectionKeeper ck) {
         this.ck = ck;
         ipNumber = sock.getInetAddress().getHostAddress();
@@ -24,6 +25,7 @@ public class ConnectedClient {
         msgSend = new ServerMsgSender(this.sock, this);
         msgList = new ServerMsgListener(this.sock, this);
         nick = "" + portNumber;
+        if(!entered) sendMessage("" + MainServer.PUSHMARKER + "NEEDPASS"); // 提示客户端弹口令框
     }
     public ConnectionKeeper getConnectionKeeper() {
             return ck;
@@ -44,6 +46,7 @@ public class ConnectedClient {
         msgList.closeConnection();
         msgSend.closeConnection();
         try { sock.close(); } catch(Exception e) {} // 解除接收线程的 read() 阻塞，连接真正释放
+        MainServer.rooms.leaveAll(nick); // 下线时退出所有群组(功能十七)
         ck.remove(this);
     }
     public void runCommand(String str) {
@@ -161,13 +164,19 @@ class ServerMsgListener extends Thread {
                 }
                 if(!isCommand) {
                     if(body.trim().length() == 0) continue; // 空消息不广播
-                    // 群聊消息升级为带唯一 ID 的推送(功能十二):0x01 MSG <id> <昵称> <正文>
-                    // ID 让每条消息可寻址,是已读回执/消息撤回(阶段二)的前置
-                    String toSend = "" + MainServer.PUSHMARKER + "MSG "
-                                    + MainServer.nextMsgId() + " " + cc.nick + " " + body;
+                    if(!cc.entered) { cc.sendMessage("Server: 需要进入口令,请输入 /enter <口令>"); continue; }
+                    // 群聊消息带唯一 ID:0x01 MSG <id> <昵称> <正文>;记录元数据供回执/撤回
+                    long id = MainServer.nextMsgId();
+                    MainServer.recordMsg(id, cc.nick, "*");
+                    String toSend = "" + MainServer.PUSHMARKER + "MSG " + id + " " + cc.nick + " " + body;
                     if(cc.printMsg) System.out.println("MsgListenet.run Sending msg: " + toSend);
-                    cc.broadcastMessage(toSend);
+                    if(MainServer.isMuted(cc.nick)) cc.sendMessage(toSend); // 被禁言:只回显自己,不广播(功能十八)
+                    else cc.broadcastMessage(toSend);
                 } else {
+                    // 准入门禁:未通过口令时只放行 enter 命令(功能十八)
+                    if(!cc.entered && !body.toLowerCase().startsWith("enter")) {
+                        cc.sendMessage("Server: 需要进入口令,请输入 /enter <口令>"); continue;
+                    }
                     // 还原成 "0xFD + 正文" 交给 runCommand，保持它 charAt(0)==0xFD 再 substring(1) 的老约定不变
                     cc.runCommand("" + (char)0xFD + body);
                 }

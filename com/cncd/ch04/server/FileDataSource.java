@@ -388,4 +388,43 @@ public class FileDataSource implements DataSource {
         if(removed) rewriteInfoFile();
         return removed;
     }
+    // ===== 离线消息(功能十六):落盘 offline 文件,格式 收件人|发件人|时刻毫秒|正文 =====
+    public boolean isRegistered(String user) {
+        Iterator it = users.iterator();
+        while(it.hasNext()) if(((User)it.next()).getName().equalsIgnoreCase(user)) return true;
+        return false;
+    }
+    private File offlineFile() { return new File(fsroot + "offline"); }
+    public synchronized void addOffline(String to, String from, String text) {
+        try {
+            FileOutputStream fo = new FileOutputStream(offlineFile(), true);
+            OutputStreamWriter osw = new OutputStreamWriter(fo, "UTF-8");
+            BufferedWriter w = new BufferedWriter(osw);
+            // 正文里的换行替换成空格,保证一条一行
+            w.write(to + "|" + from + "|" + System.currentTimeMillis() + "|" + text.replace('\n',' ') + "\n");
+            w.close();
+        } catch(IOException e) { System.out.println("addOffline: " + e.getMessage()); }
+    }
+    public synchronized String[] takeOffline(String to) {
+        File f = offlineFile();
+        if(!f.exists()) return new String[0];
+        Vector mine = new Vector();
+        Vector rest = new Vector();
+        try {
+            BufferedReader r = new BufferedReader(new InputStreamReader(new FileInputStream(f), "UTF-8"));
+            String line;
+            while((line = r.readLine()) != null) {
+                if(line.length() == 0) continue;
+                String[] p = line.split("\\|", 4);
+                if(p.length == 4 && p[0].equalsIgnoreCase(to)) mine.add(p[1] + "|" + p[2] + "|" + p[3]);
+                else rest.add(line);
+            }
+            r.close();
+            // 重写文件,只留下别人的
+            BufferedWriter w = new BufferedWriter(new OutputStreamWriter(new FileOutputStream(f), "UTF-8"));
+            for(int i=0;i<rest.size();i++) w.write((String)rest.get(i) + "\n");
+            w.close();
+        } catch(IOException e) { System.out.println("takeOffline: " + e.getMessage()); }
+        return (String[])mine.toArray(new String[0]);
+    }
 }

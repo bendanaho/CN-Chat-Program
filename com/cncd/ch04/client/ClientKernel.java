@@ -35,13 +35,35 @@ public class ClientKernel {
     // ===== 心跳(功能十一):定时发 /hb,服务器原样回显;既证明自己活着,也检测服务器死没死 =====
     private volatile long lastHbReply = System.currentTimeMillis();
     private int hbSeq = 0;
-    public volatile long lastRtt = -1; // 最近一次心跳往返时延(阶段二网络面板的数据源)
+    public volatile long lastRtt = -1; // 最近一次心跳往返时延(功能十五网络面板数据源)
+    // 网络统计(功能十五)
+    public volatile long rttMin = Long.MAX_VALUE, rttMax = -1, rttSum = 0, rttCount = 0;
+    public volatile int hbSent = 0, hbRecv = 0;              // 心跳发/收计数 → 丢包率
+    public volatile long bytesOut = 0, bytesIn = 0;         // 收发字节累计
+    public final long connectStart = System.currentTimeMillis();
+    public void addBytesOut(long n) { bytesOut += n; }
+    public void addBytesIn(long n) { bytesIn += n; }
+    private String kb(long b) { return b < 1024 ? b + "B" : (b/1024) + "KB"; }
+    private String upfmt(long s) { return (s/60) + ":" + (s%60 < 10 ? "0" : "") + (s%60); }
+    // 组装状态栏文本:RTT 四项 + 丢包率 + 收发流量 + 在线时长
+    public String statsLine() {
+        long up = (System.currentTimeMillis() - connectStart) / 1000;
+        String cur = lastRtt < 0 ? "--" : lastRtt + "ms";
+        String avg = rttCount == 0 ? "--" : (rttSum / rttCount) + "ms";
+        String mn = rttMin == Long.MAX_VALUE ? "--" : rttMin + "";
+        String mx = rttMax < 0 ? "--" : rttMax + "";
+        int loss = hbSent == 0 ? 0 : (int)((hbSent - hbRecv) * 100L / hbSent);
+        return "  RTT " + cur + " (最小 " + mn + " / 平均 " + avg + " / 最大 " + mx + "ms)"
+             + "　丢包 " + loss + "%　收 " + kb(bytesIn) + " / 发 " + kb(bytesOut)
+             + "　在线 " + upfmt(up);
+    }
     class Heartbeat extends Thread {
         public Heartbeat() { setDaemon(true); }
         public void run() {
             while(!dropMe && isConnected) {
                 pause(5000);
                 if(dropMe || !isConnected) break;
+                hbSent++;
                 sendMessage("/hb " + (++hbSeq) + " " + System.currentTimeMillis());
                 // 15 秒收不到任何心跳应答 → 服务器已死(TCP 自身对拔网线类故障要很久才报错)
                 if(System.currentTimeMillis() - lastHbReply > 15000) {
@@ -57,7 +79,11 @@ public class ClientKernel {
         try {
             StringTokenizer st = new StringTokenizer(s.substring(4));
             st.nextToken(); // seq
-            lastRtt = System.currentTimeMillis() - Long.parseLong(st.nextToken());
+            long rtt = System.currentTimeMillis() - Long.parseLong(st.nextToken());
+            lastRtt = rtt; hbRecv++;
+            if(rtt < rttMin) rttMin = rtt;
+            if(rtt > rttMax) rttMax = rtt;
+            rttSum += rtt; rttCount++;
         } catch(Exception e) {}
     }
     // 发送队列积压量:分块传输据此让聊天消息插进块间隙(交织发送)
@@ -179,8 +205,10 @@ class ClientMsgSender extends Thread {
                     } else {
                         plain = msg.getBytes("UTF-8");
                     }
-                    dataOut.write(com.cncd.ch04.common.CryptoUtil.wrap(plain));
+                    byte[] w = com.cncd.ch04.common.CryptoUtil.wrap(plain);
+                    dataOut.write(w);
                     dataOut.write(ClientKernel.MSGENDCHAR);
+                    ck.addBytesOut(w.length + 1); // 流量统计(功能十五)
                 }
                 sleep(10);
             }
@@ -222,6 +250,7 @@ class ClientMsgListener extends Thread{
                         baos.write(c);
                     }
                     if(c == -1) break;
+                    ck.addBytesIn(baos.size() + 1); // 流量统计(功能十五)
                     if(baos.size() == 0) continue;
                     String s = new String(com.cncd.ch04.common.CryptoUtil.unwrap(baos.toByteArray()), "UTF-8");
                     if(s.length() > 3 && s.charAt(0) == ClientKernel.PUSHMARKER && s.startsWith("HB ", 1))

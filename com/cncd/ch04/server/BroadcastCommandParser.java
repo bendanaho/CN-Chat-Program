@@ -24,6 +24,12 @@ public class BroadcastCommandParser implements CommandParser {
     private final String FEND = "fend";
     // 进行中的分块传输:tid -> {目标("*"或昵称), 发送者连接}。服务器只做路由中继,不落地文件
     private final HashMap transfers = new HashMap();
+    // 阶段二命令
+    private final String ENTER = "enter";     // 准入口令(功能十八)
+    private final String JOIN = "join", PART = "part", ROOMS = "rooms", ROOM = "room"; // 群组(功能十七)
+    private final String KICK = "kick", MUTE = "mute", UNMUTE = "unmute", ANNOUNCE = "announce"; // 管理(功能十八)
+    private final String READ = "read", TYPING = "typing"; // 已读回执/正在输入(功能十九)
+    private final String RECALL = "recall";   // 消息撤回(功能二十)
     private final String FRIEND_FIELD = "friends"; // 好友名单在 DataSource 中的保留字段名
         private final String tab = "&nbsp;&nbsp;&nbsp;";
     private DataSource ds;
@@ -83,6 +89,30 @@ public class BroadcastCommandParser implements CommandParser {
                     fchunk(cc, strTok);
                 else if(command.equalsIgnoreCase(FEND))
                     fend(cc, strTok);
+                else if(command.equalsIgnoreCase(ENTER))
+                    enter(cc, strTok);
+                else if(command.equalsIgnoreCase(JOIN))
+                    join(cc, strTok);
+                else if(command.equalsIgnoreCase(PART))
+                    part(cc, strTok);
+                else if(command.equalsIgnoreCase(ROOMS))
+                    listRooms(cc);
+                else if(command.equalsIgnoreCase(ROOM))
+                    room(cc, strTok);
+                else if(command.equalsIgnoreCase(KICK))
+                    kick(cc, strTok);
+                else if(command.equalsIgnoreCase(MUTE))
+                    setMute(cc, strTok, true);
+                else if(command.equalsIgnoreCase(UNMUTE))
+                    setMute(cc, strTok, false);
+                else if(command.equalsIgnoreCase(ANNOUNCE))
+                    announce(cc, strTok);
+                else if(command.equalsIgnoreCase(READ))
+                    readReceipt(cc, strTok);
+                else if(command.equalsIgnoreCase(TYPING))
+                    typing(cc, strTok);
+                else if(command.equalsIgnoreCase(RECALL))
+                    recall(cc, strTok);
             }
         } catch(Exception e) {
             System.out.println("CommandParser: " + e.getMessage());
@@ -135,12 +165,32 @@ public class BroadcastCommandParser implements CommandParser {
             return;
         }
         // 私聊为机器可读推送(带消息唯一 ID)：接收方 0x01 PM <id> 发送者 正文，
-        // 发送方回显 0x01 PMSENT <id> 目标 正文，客户端据此路由进对应会话窗格。
-        // 发送者仅在对方存在时收到回显（sendTo 找不到人时已发 "Unable to find user"）
+        // 发送方回显 0x01 PMSENT <id> 目标 正文。id 记录作用域=目标昵称,供已读回执/撤回定位
         long id = MainServer.nextMsgId();
+        MainServer.recordMsg(id, cc.nick, user);
         boolean found = cc.sendTo(user, "" + MainServer.PUSHMARKER + "PM " + id + " " + cc.nick + " " + body);
-        if(found)
+        if(found) {
             cc.sendMessage("" + MainServer.PUSHMARKER + "PMSENT " + id + " " + user + " " + body);
+        } else if(ds.isRegistered(user)) {
+            // 对方离线但已注册 → 存为离线消息,上线验证身份后补发(功能十六)
+            ds.addOffline(user, cc.nick, body);
+            cc.sendMessage("<font color=\"#9933cc\">[离线消息] " + user + " 当前不在线,消息已暂存,对方上线后送达</font>");
+        }
+        // 未注册的离线用户:sendTo 已提示 "Unable to find user"
+    }
+    // 上线并确立身份后,补发暂存的离线消息(功能十六);仅对已验证的注册昵称投递
+    private void deliverOffline(ConnectedClient cc) {
+        if(!cc.verifyedBoolean) return; // 未通过密码验证的昵称不收留言,防冒领
+        String[] ms = ds.takeOffline(cc.nick);
+        for(int i=0;i<ms.length;i++) {
+            String[] p = ms[i].split("\\|", 3); // from|time|text
+            if(p.length < 3) continue;
+            String t = new java.text.SimpleDateFormat("MM-dd HH:mm").format(new java.util.Date(Long.parseLong(p[1])));
+            long id = MainServer.nextMsgId();
+            MainServer.recordMsg(id, p[0], cc.nick);
+            cc.sendMessage("" + MainServer.PUSHMARKER + "PM " + id + " " + p[0]
+                    + " <font color=\"#9933cc\">[离线消息 " + t + "]</font> " + p[2]);
+        }
     }
     // 心跳应答(功能十一):把客户端发来的 seq/时间戳原样推回,一包两用——测活 + 测 RTT
     private void heartbeat(ConnectedClient cc, StringTokenizer strTok) {
@@ -246,6 +296,8 @@ public class BroadcastCommandParser implements CommandParser {
                 cc.verifyedBoolean = true;
                 cc.getConnectionKeeper().broadcastUserList();
                 notifyFriendOnline(cc);
+                deliverOffline(cc);
+                pushRooms(cc);
                 pushFriends(cc);
             } else {
                 cc.sendMessage("The username is allready taken");
@@ -261,6 +313,8 @@ public class BroadcastCommandParser implements CommandParser {
             cc.sendMessage("Server: nick verified, you are now known as " + cc.nick);
             notifyFriendOnline(cc);
             pushFriends(cc);
+            deliverOffline(cc);
+            pushRooms(cc);
         } else {
             cc.nick = "" + cc.portNumber;
             cc.sendMessage("Invalid user/pass, your nick is set to " + cc.nick);
@@ -271,6 +325,157 @@ public class BroadcastCommandParser implements CommandParser {
         cc.sendMessage("Server: You are being disconected!");
         try { Thread.sleep(50); } catch(Exception e) {}
         cc.dropClient();
+    }
+    // ===== 准入口令(功能十八) =====
+    private void enter(ConnectedClient cc, StringTokenizer st) {
+        String p = st.hasMoreTokens() ? st.nextToken() : "";
+        if(p.equals(MainServer.ENTRYPASS)) {
+            cc.entered = true;
+            cc.sendMessage("<font color=\"#008800\">口令正确,已进入聊天室</font>");
+        } else {
+            cc.sendMessage("<font color=\"#cc0000\">口令错误,请重试: /enter &lt;口令&gt;</font>");
+        }
+    }
+    // ===== 群组(功能十七) =====
+    private void join(ConnectedClient cc, StringTokenizer st) {
+        if(!st.hasMoreTokens()) { cc.sendMessage("usage: /join <群名>"); return; }
+        String room = st.nextToken();
+        MainServer.rooms.join(room, cc.nick);
+        cc.sendMessage("<font color=\"#008800\">已加入群组 [" + room + "]</font>");
+        roomNotice(cc, room, cc.nick + " 加入了群组");
+        pushRooms(cc);
+    }
+    private void part(ConnectedClient cc, StringTokenizer st) {
+        if(!st.hasMoreTokens()) { cc.sendMessage("usage: /part <群名>"); return; }
+        String room = st.nextToken();
+        MainServer.rooms.leave(room, cc.nick);
+        cc.sendMessage("已退出群组 [" + room + "]");
+        roomNotice(cc, room, cc.nick + " 退出了群组");
+        pushRooms(cc);
+    }
+    private void listRooms(ConnectedClient cc) {
+        String[] all = MainServer.rooms.allRooms();
+        if(all.length == 0) { cc.sendMessage("当前没有群组,用 /join <群名> 创建"); return; }
+        String m = "现有群组:<br>";
+        for(int i=0;i<all.length;i++)
+            m += tab + all[i] + "(" + MainServer.rooms.members(all[i]).length + " 人)<br>";
+        cc.sendMessage(m);
+    }
+    private void room(ConnectedClient cc, StringTokenizer st) {
+        if(!st.hasMoreTokens()) return;
+        String room = st.nextToken();
+        if(!MainServer.rooms.isMember(room, cc.nick)) { cc.sendMessage("你不在群组 [" + room + "],先 /join"); return; }
+        StringBuffer sb = new StringBuffer();
+        while(st.hasMoreTokens()) { if(sb.length()>0) sb.append(' '); sb.append(st.nextToken()); }
+        if(sb.length() == 0) return;
+        long id = MainServer.nextMsgId();
+        String push = "" + MainServer.PUSHMARKER + "ROOM " + id + " " + room + " " + cc.nick + " " + sb;
+        if(MainServer.isMuted(cc.nick)) { cc.sendMessage(push); return; } // 禁言:只回显自己
+        MainServer.recordMsg(id, cc.nick, "#" + room);
+        sendToRoom(room, push, cc);
+    }
+    // 发给某房间的全部在线成员
+    private void sendToRoom(String room, String push, ConnectedClient any) {
+        LinkedList users = any.getConnectionKeeper().users();
+        Iterator it = users.iterator();
+        while(it.hasNext()) {
+            ConnectedClient u = (ConnectedClient)(it.next());
+            if(MainServer.rooms.isMember(room, u.getNick())) u.sendMessage(push);
+        }
+    }
+    private void roomNotice(ConnectedClient actor, String room, String text) {
+        sendToRoom(room, "" + MainServer.PUSHMARKER + "ROOMSYS " + room + " " + text, actor);
+    }
+    // 下发某人所在的群组列表 → 客户端侧栏"群组"分组
+    private void pushRooms(ConnectedClient cc) {
+        String[] rs = MainServer.rooms.roomsOf(cc.nick);
+        StringBuffer sb = new StringBuffer("" + MainServer.PUSHMARKER + "ROOMS");
+        for(int i=0;i<rs.length;i++) sb.append(' ').append(rs[i]);
+        cc.sendMessage(sb.toString());
+    }
+    // ===== 管理员(功能十八):踢人/禁言/公告 =====
+    private boolean isAdmin(ConnectedClient cc) {
+        return MainServer.ADMIN.length() > 0 && cc.nick.equalsIgnoreCase(MainServer.ADMIN);
+    }
+    private void kick(ConnectedClient cc, StringTokenizer st) {
+        if(!isAdmin(cc)) { cc.sendMessage("需要管理员权限"); return; }
+        if(!st.hasMoreTokens()) { cc.sendMessage("usage: /kick <用户>"); return; }
+        String target = st.nextToken();
+        boolean done = false;
+        LinkedList users = cc.getConnectionKeeper().users();
+        Iterator it = users.iterator();
+        while(it.hasNext()) {
+            ConnectedClient u = (ConnectedClient)(it.next());
+            if(u.getNick().equalsIgnoreCase(target)) {
+                u.sendMessage("<font color=\"#cc0000\">你已被管理员踢出聊天室</font>");
+                try { Thread.sleep(60); } catch(Exception e) {}
+                u.dropClient();
+                done = true;
+            }
+        }
+        cc.sendMessage(done ? "已踢出 " + target : "用户 " + target + " 不在线");
+    }
+    private void setMute(ConnectedClient cc, StringTokenizer st, boolean mute) {
+        if(!isAdmin(cc)) { cc.sendMessage("需要管理员权限"); return; }
+        if(!st.hasMoreTokens()) { cc.sendMessage("usage: /" + (mute?"mute":"unmute") + " <用户>"); return; }
+        String target = st.nextToken();
+        synchronized(MainServer.muted) {
+            if(mute) MainServer.muted.add(target.toLowerCase());
+            else MainServer.muted.remove(target.toLowerCase());
+        }
+        cc.sendMessage((mute ? "已禁言 " : "已解除禁言 ") + target);
+        LinkedList users = cc.getConnectionKeeper().users();
+        Iterator it = users.iterator();
+        while(it.hasNext()) {
+            ConnectedClient u = (ConnectedClient)(it.next());
+            if(u.getNick().equalsIgnoreCase(target))
+                u.sendMessage("<font color=\"#ff8800\">你已被管理员" + (mute ? "禁言" : "解除禁言") + "</font>");
+        }
+    }
+    private void announce(ConnectedClient cc, StringTokenizer st) {
+        if(!isAdmin(cc)) { cc.sendMessage("需要管理员权限"); return; }
+        StringBuffer sb = new StringBuffer();
+        while(st.hasMoreTokens()) { if(sb.length()>0) sb.append(' '); sb.append(st.nextToken()); }
+        if(sb.length() == 0) return;
+        cc.getConnectionKeeper().broadcast("<font color=\"#ff8800\"><b>[公告] " + sb + "</b></font>");
+    }
+    // ===== 已读回执 / 正在输入(功能十九) =====
+    private void pushToNick(ConnectedClient any, String nick, String msg) {
+        LinkedList users = any.getConnectionKeeper().users();
+        Iterator it = users.iterator();
+        while(it.hasNext()) {
+            ConnectedClient u = (ConnectedClient)(it.next());
+            if(u.getNick().equalsIgnoreCase(nick)) u.sendMessage(msg);
+        }
+    }
+    private void readReceipt(ConnectedClient cc, StringTokenizer st) {
+        if(!st.hasMoreTokens()) return;
+        long id;
+        try { id = Long.parseLong(st.nextToken()); } catch(Exception e) { return; }
+        String[] info = MainServer.msgInfo(id); // [发送者, 时刻, 作用域]
+        if(info == null || !info[2].equalsIgnoreCase(cc.nick)) return; // 只有该私聊的接收方能回执
+        pushToNick(cc, info[0], "" + MainServer.PUSHMARKER + "READ " + id); // 通知原发送者
+    }
+    private void typing(ConnectedClient cc, StringTokenizer st) {
+        if(!st.hasMoreTokens()) return;
+        pushToNick(cc, st.nextToken(), "" + MainServer.PUSHMARKER + "TYPING " + cc.nick);
+    }
+    // ===== 消息撤回(功能二十) =====
+    private void recall(ConnectedClient cc, StringTokenizer st) {
+        if(!st.hasMoreTokens()) return;
+        long id;
+        try { id = Long.parseLong(st.nextToken()); } catch(Exception e) { return; }
+        String[] info = MainServer.msgInfo(id);
+        if(info == null) { cc.sendMessage("消息不存在或已过期,无法撤回"); return; }
+        if(!info[0].equalsIgnoreCase(cc.nick)) { cc.sendMessage("只能撤回自己的消息"); return; }
+        if(System.currentTimeMillis() - Long.parseLong(info[1]) > MainServer.RECALL_LIMIT) {
+            cc.sendMessage("超过 2 分钟,无法撤回"); return;
+        }
+        String scope = info[2];
+        String push = "" + MainServer.PUSHMARKER + "RECALL " + id + " " + cc.nick;
+        if(scope.equals("*")) cc.getConnectionKeeper().broadcast(push);            // 群聊:广播
+        else if(scope.startsWith("#")) sendToRoom(scope.substring(1), push, cc);   // 群组
+        else { pushToNick(cc, scope, push); cc.sendMessage(push); }                // 私聊:对方+自己
     }
     public void setDataSource(DataSource ds) {
         this.ds = ds;

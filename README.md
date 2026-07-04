@@ -43,6 +43,17 @@ java -cp out com.cncd.ch04.client.ChatClient
 3. 其他机器拷贝 `chat-client.jar` 双击运行,点 **"扫描局域网"**(UDP 广播自动发现服务器并填入地址),再点 Connect 即可;
 4. 全部消息默认 **AES 加密**传输;两端都加 `-Dchat.plain=true` 启动可切回明文(抓包对比演示用)。
 
+## 服务器启动参数(阶段二)
+
+```
+java -jar chat-server.jar 3500 [可选参数]
+  -Dchat.admin=<昵称>   指定管理员(可用 /kick /mute /unmute /announce)
+  -Dchat.pass=<口令>    设置进入口令(客户端连接后需输入口令才能聊天)
+  -Dchat.plain=true     关闭 AES 加密(明文,供抓包对比)
+```
+
+阶段二命令:`/join <群>` `/part <群>` `/rooms`(群组)、`/kick` `/mute` `/unmute` `/announce`(管理员)、`/enter <口令>`(准入)。客户端另有:左侧"＋群组"按钮、底部网络状态栏(RTT/丢包/流量/在线时长)、私聊已送达·已读、对方"正在输入"、自己消息的"撤回"链接(2 分钟内)。
+
 ## 协议约定
 
 单 TCP 连接,消息以字节 `0xFF` 结尾;`0xFD` 开头表示客户端命令;`0x01` 开头表示服务器推送(在线名单 `USERLIST`、文件 `FILE`);正文统一 UTF-8 编码(三个控制字节均不会出现在合法 UTF-8 序列中,天然无冲突)。

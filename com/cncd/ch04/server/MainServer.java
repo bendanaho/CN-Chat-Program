@@ -16,6 +16,24 @@ public class MainServer extends Thread {
     // 消息唯一 ID(功能十二协议升级引入):群聊/私聊每条消息可寻址,是回执/撤回的前置
     private static long msgId = 0;
     public static synchronized long nextMsgId() { return ++msgId; }
+    // 阶段二配置(默认全空/无限制,零行为变化)
+    public static final String ADMIN = System.getProperty("chat.admin", "");     // 管理员昵称(功能十八)
+    public static final String ENTRYPASS = System.getProperty("chat.pass", "");   // 进入口令(空=不设防)
+    public static final long RECALL_LIMIT = 120 * 1000;                            // 撤回时限 2 分钟(功能二十)
+    public static final java.util.HashSet muted = new java.util.HashSet();         // 被禁言昵称(小写)
+    // 消息元数据(功能十九读回执 / 二十撤回 共用):id -> "发送者|时刻|作用域(*|昵称|#房间)"
+    private static final java.util.HashMap msgMeta = new java.util.HashMap();
+    public static synchronized void recordMsg(long id, String sender, String scope) {
+        msgMeta.put(Long.valueOf(id), sender + "|" + System.currentTimeMillis() + "|" + scope);
+        if(msgMeta.size() > 5000) msgMeta.clear(); // 简单容量控制(课设规模足够)
+    }
+    public static synchronized String[] msgInfo(long id) {
+        Object o = msgMeta.get(Long.valueOf(id));
+        return o == null ? null : ((String)o).split("\\|", 3); // [发送者, 时刻, 作用域]
+    }
+    public static boolean isMuted(String nick) { synchronized(muted) { return muted.contains(nick.toLowerCase()); } }
+    // 房间管理(功能十七):房间名 -> 成员昵称集合(小写)
+    public static final RoomManager rooms = new RoomManager();
     int port = 1984;
     int clients = 8;
     private ServerSocket sSock;

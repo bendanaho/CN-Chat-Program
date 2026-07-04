@@ -42,6 +42,13 @@ public class ChatClient extends JFrame implements KeyListener, ActionListener, F
     HashMap recvs = new HashMap();     // 分块接收中的文件:tid -> FileRecv(功能十二)
     private static int tidCounter = 0;
     private String rawInfoHtml = "";   // 右栏信息的原始(带颜色占位符)HTML,切主题时重渲染
+    Vector rooms = new Vector();        // 我加入的群组(功能十七)
+    HashMap sentPm = new HashMap();     // 我发出的私聊 id -> {会话, 正文},收到 READ 时更新已读(功能十九)
+    HashMap lastRecvId = new HashMap(); // 会话 -> 最近收到的对方私聊消息 id(打开会话时回执,功能十九)
+    JButton buttonRoom;                 // 加入/创建群组
+    JLabel statusBar, typingLabel;      // 网络状态栏(功能十五)、正在输入提示(功能十九)
+    long lastTypingSent = 0;            // /typing 节流
+    javax.swing.Timer typingClearTimer; // 定时清除"对方正在输入"
     ClientKernel ck;
     ClientHistory historyWindow;
     private String lastMsg = "";
@@ -100,19 +107,34 @@ public class ChatClient extends JFrame implements KeyListener, ActionListener, F
         txtPort.addFocusListener(this);
         buttonConnect.addKeyListener(this);
         this.add(northPanel, BorderLayout.NORTH);
-        //创建South:输入框占满,按钮靠右
+        //创建South:上="对方正在输入"提示,中=输入框,右=按钮
         southPanel = new JPanel(new BorderLayout(4, 0));
-        southPanel.setBorder(BorderFactory.createEmptyBorder(4,6,4,6));
+        southPanel.setBorder(BorderFactory.createEmptyBorder(2,6,4,6));
+        typingLabel = new JLabel(" ");
+        typingLabel.setForeground(Color.gray);
+        typingLabel.setFont(new Font("Microsoft YaHei", Font.PLAIN, 11));
         msgWindow = new JTextField();
         msgWindow.setFont(new Font("Microsoft YaHei", Font.PLAIN, 14));
         JPanel sendBtns = new JPanel(new FlowLayout(FlowLayout.RIGHT, 4, 0));
         sendBtns.add(buttonFile = new JButton("文件"));
         sendBtns.add(buttonSend = new JButton("发送"));
+        southPanel.add(typingLabel, BorderLayout.NORTH);
         southPanel.add(msgWindow, BorderLayout.CENTER);
         southPanel.add(sendBtns, BorderLayout.EAST);
         buttonSend.addActionListener(this);
         buttonFile.addActionListener(this);
         msgWindow.addKeyListener(this);
+        // 网络状态栏(功能十五):贴在整个窗口最底部,每秒刷新
+        statusBar = new JLabel(" 未连接");
+        statusBar.setFont(new Font("Microsoft YaHei", Font.PLAIN, 11));
+        statusBar.setBorder(BorderFactory.createEmptyBorder(1,6,1,6));
+        this.add(statusBar, BorderLayout.SOUTH);
+        new javax.swing.Timer(1000, new ActionListener() {
+            public void actionPerformed(ActionEvent ev) {
+                statusBar.setText(ck != null && ck.isConnected() ? ck.statsLine()
+                        : (reconnecting ? "  连接已断开,自动重连中..." : "  未连接"));
+            }
+        }).start();
         //创建Center：CardLayout，每个会话一个独立聊天窗格
         centerLayout = new CardLayout();
         centerCards = new JPanel(centerLayout);
@@ -182,9 +204,13 @@ public class ChatClient extends JFrame implements KeyListener, ActionListener, F
             public void mousePressed(MouseEvent e) { convMenu(e); }
             public void mouseReleased(MouseEvent e) { convMenu(e); }
         });
-        JScrollPane convScroll = new JScrollPane(convList);
-        convScroll.setPreferredSize(new Dimension(150, 0));
-        this.add(convScroll, BorderLayout.WEST);
+        JPanel westPanel = new JPanel(new BorderLayout());
+        buttonRoom = new JButton("＋ 加入/创建群组");
+        buttonRoom.addActionListener(this);
+        westPanel.add(buttonRoom, BorderLayout.NORTH);
+        westPanel.add(new JScrollPane(convList), BorderLayout.CENTER);
+        westPanel.setPreferredSize(new Dimension(150, 0));
+        this.add(westPanel, BorderLayout.WEST);
         rebuildConvList();
         applyTheme(); // 启动即按用户上次选择的主题渲染
     }
@@ -332,12 +358,17 @@ public class ChatClient extends JFrame implements KeyListener, ActionListener, F
             String[] t = split3(cmd.substring(3));
             if(t == null) return;
             ensureConv(t[1]).putMsg("m" + t[0], ClientHistory.OTHER, t[1], t[2]);
+            lastRecvId.put(t[1], t[0]);          // 记住最近收到的 id,供已读回执
+            if(t[1].equals(currentConv) && ck != null && ck.isConnected())
+                ck.sendMessage("/read " + t[0]); // 正在看这个会话 → 立即回执已读
             markUnread(t[1]);
         } else if(cmd.startsWith("PMSENT ")) {
-            // 我发出的私聊回显: PMSENT <id> <目标> <正文> → 靠右气泡
+            // 我发出的私聊回显: PMSENT <id> <目标> <正文> → 靠右气泡,附"已送达"
             String[] t = split3(cmd.substring(7));
             if(t == null) return;
-            ensureConv(t[1]).putMsg("m" + t[0], ClientHistory.SELF, txtNick.getText().trim(), t[2]);
+            sentPm.put(t[0], new String[]{ t[1], t[2] }); // 存正文,收到 READ 时改为"已读"
+            ensureConv(t[1]).putMsg("m" + t[0], ClientHistory.SELF, txtNick.getText().trim(),
+                    t[2] + " <font size=\"2\" color=\"" + Theme.TIME + "\">· 已送达</font>");
         } else if(cmd.startsWith("LOST")) {
             // 断线(功能十一):系统提示 + 自动重连
             appendTo(MAIN_ROOM, "<font color=\"" + Theme.ERR + "\">与服务器的连接已断开,自动重连中...</font>");
@@ -354,6 +385,42 @@ public class ChatClient extends JFrame implements KeyListener, ActionListener, F
             receiveFile(cmd.substring(5), MAIN_ROOM);
         } else if(cmd.startsWith("USERINFO ")) {
             showUserInfo(cmd.substring(9));
+        } else if(cmd.startsWith("NEEDPASS")) {
+            promptEntryPass();
+        } else if(cmd.startsWith("ROOMS")) {
+            rooms.clear();
+            StringTokenizer st = new StringTokenizer(cmd.length() > 5 ? cmd.substring(5) : "");
+            while(st.hasMoreTokens()) rooms.add(st.nextToken());
+            rebuildConvList();
+        } else if(cmd.startsWith("ROOM ")) {
+            // 群组消息: ROOM <id> <房间> <发送者> <正文>
+            String[] t = split3(cmd.substring(5)); // t=[id, 房间, "发送者 正文"]
+            if(t == null) return;
+            int sp = t[2].indexOf(' ');
+            if(sp < 0) return;
+            String sender = t[2].substring(0, sp), body = t[2].substring(sp + 1);
+            String conv = "#" + t[1];
+            boolean mine = sender.equalsIgnoreCase(txtNick.getText().trim());
+            ensureConv(conv).putMsg("m" + t[0], mine ? ClientHistory.SELF : ClientHistory.OTHER, sender, body);
+            markUnread(conv);
+        } else if(cmd.startsWith("ROOMSYS ")) {
+            int sp = cmd.indexOf(' ', 8);
+            if(sp < 0) return;
+            appendTo("#" + cmd.substring(8, sp), "<font color=\"" + Theme.WARN + "\">" + cmd.substring(sp + 1) + "</font>");
+        } else if(cmd.startsWith("READ ")) {
+            // 对方已读我发的私聊: 更新气泡为"已读"(功能十九)
+            String id = cmd.substring(5).trim();
+            String[] cb = (String[])sentPm.get(id);
+            if(cb != null) ensureConv(cb[0]).putMsg("m" + id, ClientHistory.SELF, txtNick.getText().trim(),
+                    cb[1] + " <font size=\"2\" color=\"" + Theme.OK + "\">· 已读</font>");
+        } else if(cmd.startsWith("TYPING ")) {
+            showTyping(cmd.substring(7).trim());
+        } else if(cmd.startsWith("RECALL ")) {
+            // RECALL <id> <撤回者>: 把该消息替换为撤回占位(功能二十)
+            int sp = cmd.indexOf(' ', 7);
+            String id = (sp < 0) ? cmd.substring(7).trim() : cmd.substring(7, sp);
+            String who = (sp < 0) ? "对方" : cmd.substring(sp + 1);
+            recallEverywhere("m" + id, who);
         }
     }
     // 把 "a b 其余部分" 切成三段(前两段无空格,第三段可含任意内容)
@@ -365,6 +432,37 @@ public class ChatClient extends JFrame implements KeyListener, ActionListener, F
     }
     private void markUnread(String conv) {
         if(!conv.equals(currentConv)) { unread.add(conv); rebuildConvList(); }
+    }
+    // 准入口令(功能十八):服务器要求口令时弹框输入并发 /enter
+    private void promptEntryPass() {
+        SwingUtilities.invokeLater(new Runnable() { public void run() {
+            String p = JOptionPane.showInputDialog(ChatClient.this, "该聊天室需要进入口令:", "口令", JOptionPane.QUESTION_MESSAGE);
+            if(p != null && ck != null && ck.isConnected()) ck.sendMessage("/enter " + p.trim());
+        }});
+    }
+    // "对方正在输入"提示(功能十九):仅当前会话对象在输入时显示,3 秒后自动清除
+    private void showTyping(final String who) {
+        if(!who.equals(currentConv)) return;
+        typingLabel.setText(" " + who + " 正在输入...");
+        if(typingClearTimer != null) typingClearTimer.stop();
+        typingClearTimer = new javax.swing.Timer(3000, new ActionListener() {
+            public void actionPerformed(ActionEvent ev) { typingLabel.setText(" "); }
+        });
+        typingClearTimer.setRepeats(false);
+        typingClearTimer.start();
+    }
+    // 撤回(功能二十):同一条消息可能在多个会话窗格出现,逐一替换为撤回占位
+    private void recallEverywhere(String key, String who) {
+        Iterator it = convs.values().iterator();
+        while(it.hasNext()) ((ClientHistory)(it.next())).recall(key, who);
+    }
+    // 加入/创建群组(功能十七)
+    private void joinRoom() {
+        if(ck == null || !ck.isConnected()) { addMsg("<font color=\"" + Theme.ERR + "\">请先连接服务器</font>"); return; }
+        String r = JOptionPane.showInputDialog(this, "输入群组名(不存在则创建):", "加入/创建群组", JOptionPane.QUESTION_MESSAGE);
+        if(r == null) return;
+        r = r.trim().replace(' ', '_');
+        if(r.length() > 0) { ck.sendMessage("/join " + r); openConv("#" + r); }
     }
     // 文件展示 HTML(收发共用;发送方与接收方的身份由气泡朝向体现,这里不再带"来自/我"前缀)
     private String buildFileHtml(java.io.File out, String fname) {
@@ -487,13 +585,17 @@ public class ChatClient extends JFrame implements KeyListener, ActionListener, F
         ensureConv(name);
         unread.remove(name);
         centerLayout.show(centerCards, name);
-        if(MAIN_ROOM.equals(name)) {
-            eastLayout.show(eastCards, "users");
+        if(MAIN_ROOM.equals(name) || name.startsWith("#")) {
+            eastLayout.show(eastCards, "users"); // 群聊/群组:右栏显示在线用户
         } else {
             eastLayout.show(eastCards, "info");
             buttonAddFriend.setVisible(!containsIgnoreCase(friends, name)); // 已是好友就不显示"加为好友"
             infoPane.setText("查询中...");
-            if(ck != null && ck.isConnected()) ck.sendMessage("/infoq " + name); // 静默拉取对方信息填右栏
+            if(ck != null && ck.isConnected()) {
+                ck.sendMessage("/infoq " + name); // 静默拉取对方信息填右栏
+                Object rid = lastRecvId.get(name);
+                if(rid != null) ck.sendMessage("/read " + rid); // 打开私聊会话即回执已读(功能十九)
+            }
         }
         rebuildConvList();
         msgWindow.requestFocus();
@@ -508,6 +610,10 @@ public class ChatClient extends JFrame implements KeyListener, ActionListener, F
         for(int i=0;i<friends.size();i++) {
             String f = (String)friends.get(i);
             addConvItem(f + (containsIgnoreCase(online, f) ? " [在线]" : " [离线]"), f);
+        }
+        if(rooms.size() > 0) {
+            addConvItem("── 群组 ──", null);
+            for(int i=0;i<rooms.size();i++) addConvItem("# " + rooms.get(i), "#" + rooms.get(i));
         }
         boolean headerAdded = false;
         for(int i=0;i<tempConvs.size();i++) {
@@ -757,9 +863,12 @@ public class ChatClient extends JFrame implements KeyListener, ActionListener, F
             while(st.hasMoreTokens()) last = st.nextToken();
             if(last != null && !last.startsWith("/")) lastPassword = last;
         }
-        // 会话感知：私聊会话里输入的普通文字自动转为 /msg 对方 内容；命令(/开头)原样发
-        String wire = (!MAIN_ROOM.equals(currentConv) && !toSend.startsWith("/"))
-                    ? "/msg " + currentConv + " " + toSend : toSend;
+        // 会话感知:命令原样发;群组会话→/room;私聊会话→/msg;公共聊天室→原样广播
+        String wire;
+        if(toSend.startsWith("/")) wire = toSend;
+        else if(currentConv.startsWith("#")) wire = "/room " + currentConv.substring(1) + " " + toSend;
+        else if(!MAIN_ROOM.equals(currentConv)) wire = "/msg " + currentConv + " " + toSend;
+        else wire = toSend;
         if(ck == null || !ck.isConnected()) {
             if(reconnecting) { // 断线重连中:进待发队列,恢复后补发
                 pendingOut.add(wire);
@@ -778,7 +887,18 @@ public class ChatClient extends JFrame implements KeyListener, ActionListener, F
     public void keyPressed(KeyEvent e) {
     }
     public void keyReleased(KeyEvent e) {
-        if(e.getSource() == msgWindow && e.getKeyCode() == KeyEvent.VK_UP) msgWindow.setText(lastMsg);
+        if(e.getSource() == msgWindow) {
+            if(e.getKeyCode() == KeyEvent.VK_UP) msgWindow.setText(lastMsg);
+            else sendTyping(); // 私聊会话中打字 → 节流通知对方"正在输入"(功能十九)
+        }
+    }
+    private void sendTyping() {
+        if(ck == null || !ck.isConnected()) return;
+        if(MAIN_ROOM.equals(currentConv) || currentConv.startsWith("#")) return; // 仅私聊
+        long now = System.currentTimeMillis();
+        if(now - lastTypingSent < 2000) return; // 2 秒节流,防刷屏
+        lastTypingSent = now;
+        ck.sendMessage("/typing " + currentConv);
     }
     public void keyTyped(KeyEvent e) {
         if(e.getKeyChar() ==KeyEvent.VK_ENTER) {
@@ -800,6 +920,7 @@ public class ChatClient extends JFrame implements KeyListener, ActionListener, F
         if(e.getSource()==buttonSend) send();
         if(e.getSource()==buttonFile) sendFile();
         if(e.getSource()==buttonScan) scanLan();
+        if(e.getSource()==buttonRoom) joinRoom();
         if(e.getSource()==buttonTheme) { Theme.toggle(); applyTheme(); }
         if(e.getSource()==buttonAddRow) infoModel.addRow(new Object[]{"",""});
         if(e.getSource()==buttonSaveInfo) saveMyInfo();
@@ -839,26 +960,30 @@ public class ChatClient extends JFrame implements KeyListener, ActionListener, F
     // 颜色一律用 %TOKEN% 占位符,切主题时对全部历史重渲染即换色;带键消息可原位更新(进度/撤回)。
     class ClientHistory extends JEditorPane {
         static final int SYS = 0, OTHER = 1, SELF = 2;
-        class Msg { int type; String sender, body, time; }
+        class Msg { int type; String sender, body, time; long rid = -1; } // rid=可撤回的消息 id
         private Vector msgs = new Vector();
         private HashMap keyIdx = new HashMap(); // 消息键 -> 下标
         public ClientHistory() {
             super("text/html", "");
             setEditable(false);
             setAutoscrolls(true);
-            addHyperlinkListener(new HyperlinkListener() { // 点链接(原图/播放/打开)→ 系统默认程序
+            addHyperlinkListener(new HyperlinkListener() {
                 public void hyperlinkUpdate(HyperlinkEvent e) {
-                    if(e.getEventType() == HyperlinkEvent.EventType.ACTIVATED) {
-                        try { Desktop.getDesktop().open(new java.io.File(e.getURL().toURI())); }
-                        catch(Exception ex) { System.out.println("open link: " + ex.getMessage()); }
+                    if(e.getEventType() != HyperlinkEvent.EventType.ACTIVATED) return;
+                    String href = e.getDescription();
+                    if(href != null && href.startsWith("recall:")) { // 撤回链接(功能二十)
+                        if(ck != null && ck.isConnected()) ck.sendMessage("/recall " + href.substring(7));
+                        return;
                     }
+                    try { Desktop.getDesktop().open(new java.io.File(e.getURL().toURI())); } // 原图/播放/打开
+                    catch(Exception ex) { System.out.println("open link: " + ex.getMessage()); }
                 }
             });
             renderAll();
         }
         private String now() { return new java.text.SimpleDateFormat("HH:mm").format(new java.util.Date()); }
         public void addSystem(String body) { add(null, SYS, null, body); }
-        // 带键追加/原位更新:同键第二次调用替换原消息(文件进度、将来的撤回/回执)
+        // 带键追加/原位更新:同键第二次调用替换原消息(文件进度、撤回/回执)
         public void putMsg(String key, int type, String sender, String body) { add(key, type, sender, body); }
         private void add(String key, int type, String sender, String body) {
             Integer i = (key == null) ? null : (Integer)keyIdx.get(key);
@@ -866,12 +991,24 @@ public class ChatClient extends JFrame implements KeyListener, ActionListener, F
             if(i == null) {
                 m = new Msg();
                 m.time = now();
+                if(key != null && key.startsWith("m")) { // "m<id>" 是真实聊天消息,可撤回
+                    try { m.rid = Long.parseLong(key.substring(1)); } catch(Exception e) {}
+                }
                 if(key != null) keyIdx.put(key, Integer.valueOf(msgs.size()));
                 msgs.add(m);
             } else {
                 m = (Msg)msgs.get(i.intValue());
             }
             m.type = type; m.sender = sender; m.body = body;
+            renderAll();
+        }
+        // 撤回:把带该键的消息替换为居中的撤回占位(功能二十)
+        public void recall(String key, String who) {
+            Integer i = (Integer)keyIdx.get(key);
+            if(i == null) return;
+            Msg m = (Msg)msgs.get(i.intValue());
+            m.type = SYS; m.rid = -1;
+            m.body = who + " 撤回了一条消息";
             renderAll();
         }
         private String renderMsg(Msg m) {
@@ -881,7 +1018,9 @@ public class ChatClient extends JFrame implements KeyListener, ActionListener, F
             boolean self = m.type == SELF;
             String align = self ? "right" : "left";
             String bub = self ? Theme.SELFBUB : Theme.OTHERBUB;
-            String head = self ? "<font color=\"" + Theme.TIME + "\" size=\"2\">" + m.time + "</font>"
+            // 自己的消息附一个"撤回"小链接(限时由服务器校验)
+            String recall = (self && m.rid > 0) ? "&nbsp;<font size=\"2\"><a href=\"recall:" + m.rid + "\">撤回</a></font>" : "";
+            String head = self ? "<font color=\"" + Theme.TIME + "\" size=\"2\">" + m.time + recall + "</font>"
                                : "<font color=\"" + Theme.TIME + "\" size=\"2\">" + m.sender + "&nbsp;&nbsp;" + m.time + "</font>";
             // 外层表定对齐,内层表着色即为"气泡"(Swing HTML 无圆角,以底色+留白模拟)
             return "<table width=\"100%\" cellpadding=\"3\"><tr><td align=\"" + align + "\">"
