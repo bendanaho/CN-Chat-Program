@@ -9,8 +9,9 @@ public class FileDataSource implements DataSource {
     LinkedList users = new LinkedList();
     LinkedList infoList = new LinkedList();
     String pathSep = System.getProperty("file.separator");
-    String fsroot = System.getProperty("user.home") + pathSep 
-                        + ".mihalychat" + pathSep;
+    // 数据根目录:默认 用户主目录/.mihalychat;可用 -Dchat.data=<目录> 覆盖(测试用临时目录,不碰真实账号)
+    String fsroot = System.getProperty("chat.data",
+                        System.getProperty("user.home") + pathSep + ".mihalychat") + pathSep;
     File userFile, infoFile;
     boolean basicWrite = false;
     boolean allWrite = false;
@@ -46,9 +47,9 @@ public class FileDataSource implements DataSource {
             if(debug)System.out.println("FileDataSource home " + fsroot);
             basicWrite = true;
         } else {
-            System.out.println("FileDataSource is unable to access home" + 
+            System.out.println("FileDataSource is unable to access home" +
                                 "\nAttempting to create home");
-            file.mkdir();
+            file.mkdirs(); // 创建多级目录(自定义 -Dchat.data 路径的父目录可能不存在)
             if( !(file.exists() && file.isDirectory()) ) 
                 System.out.println("FileDataSource is unable to create home @ " 
                         + fsroot + " ex " + file.exists() + " isDir "

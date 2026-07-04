@@ -313,19 +313,29 @@ public class ChatClient extends JFrame implements KeyListener, ActionListener, F
             g.drawString("C", 4, 12);
             g.dispose();
             trayIcon = new java.awt.TrayIcon(im, "Chat Tool");
+            trayIcon.setImageAutoSize(true);
+            // 双击托盘图标恢复窗口
             trayIcon.addActionListener(new ActionListener() {
-                public void actionPerformed(ActionEvent e) {
-                    setVisible(true);
-                    setState(JFrame.NORMAL);
-                    toFront();
-                }
+                public void actionPerformed(ActionEvent e) { showFromTray(); }
             });
+            // 托盘右键菜单:显示主窗口 / 退出
+            java.awt.PopupMenu pop = new java.awt.PopupMenu();
+            java.awt.MenuItem show = new java.awt.MenuItem("显示主窗口");
+            show.addActionListener(new ActionListener() {
+                public void actionPerformed(ActionEvent e) { showFromTray(); }
+            });
+            java.awt.MenuItem exit = new java.awt.MenuItem("退出");
+            exit.addActionListener(new ActionListener() {
+                public void actionPerformed(ActionEvent e) { System.exit(0); }
+            });
+            pop.add(show); pop.addSeparator(); pop.add(exit);
+            trayIcon.setPopupMenu(pop);
             java.awt.SystemTray.getSystemTray().add(trayIcon);
-            addWindowListener(new WindowAdapter() {
-                public void windowIconified(WindowEvent e) { setVisible(false); } // 最小化→托盘
-            });
+            // 说明:不再"最小化即藏进托盘"——最小化就正常留在任务栏,避免窗口神秘消失。
+            // 托盘图标常驻,仅用于后台通知气泡与右键菜单。
         } catch(Exception e) {}
     }
+    private void showFromTray() { setVisible(true); setState(JFrame.NORMAL); toFront(); requestFocus(); }
     // 新消息注意力提示(功能二十四):提示音 + 未聚焦时任务栏闪烁/托盘气泡;@提及强提醒
     private void notifyIncoming(String sender, String body, boolean mention) {
         if(sender != null && isMe(sender)) return; // 自己发的不提醒
@@ -333,7 +343,7 @@ public class ChatClient extends JFrame implements KeyListener, ActionListener, F
         if(soundToggle.isSelected() && (!focused || mention)) Toolkit.getDefaultToolkit().beep();
         if(!focused) {
             toFront(); // Windows 下无法抢焦点时表现为任务栏闪烁
-            if(trayIcon != null && !isVisible())
+            if(trayIcon != null) // 后台(未聚焦)时弹托盘气泡
                 trayIcon.displayMessage("新消息", sender + ": " + body.replaceAll("<[^>]*>", ""),
                     java.awt.TrayIcon.MessageType.INFO);
         }
@@ -368,7 +378,7 @@ public class ChatClient extends JFrame implements KeyListener, ActionListener, F
     }
     private ImageIcon scaledIcon(java.io.File f) throws Exception {
         Image im = javax.imageio.ImageIO.read(f);
-        return new ImageIcon(im.getScaledInstance(20, 20, Image.SCALE_SMOOTH));
+        return new ImageIcon(im.getScaledInstance(22, 22, Image.SCALE_SMOOTH)); // 平滑缩放,列表小图标
     }
     // 某昵称的头像文件;没有则返回默认头像(灰色人形,首次生成)——供气泡旁显示
     java.io.File avatarFileOf(String nick) {
@@ -409,10 +419,11 @@ public class ChatClient extends JFrame implements KeyListener, ActionListener, F
         try {
             Image src = javax.imageio.ImageIO.read(fc.getSelectedFile());
             if(src == null) { addMsg("<font color=\"" + Theme.ERR + "\">不是有效的图片文件</font>"); return; }
-            java.awt.image.BufferedImage out = new java.awt.image.BufferedImage(48, 48,
+            java.awt.image.BufferedImage out = new java.awt.image.BufferedImage(128, 128,
                 java.awt.image.BufferedImage.TYPE_INT_RGB);
             Graphics2D g = out.createGraphics();
-            g.drawImage(src, 0, 0, 48, 48, null);
+            g.setRenderingHint(RenderingHints.KEY_INTERPOLATION, RenderingHints.VALUE_INTERPOLATION_BILINEAR);
+            g.drawImage(src, 0, 0, 128, 128, null);
             g.dispose();
             java.io.ByteArrayOutputStream baos = new java.io.ByteArrayOutputStream();
             javax.imageio.ImageIO.write(out, "png", baos);
@@ -1604,8 +1615,8 @@ public class ChatClient extends JFrame implements KeyListener, ActionListener, F
             String recall = (self && m.rid > 0) ? "&nbsp;<font size=\"2\"><a href=\"recall:" + m.rid + "\">撤回</a></font>" : "";
             String head = self ? "<font color=\"" + Theme.TIME + "\" size=\"2\">" + m.time + recall + "</font>"
                                : "<font color=\"" + Theme.TIME + "\" size=\"2\">" + m.sender + "&nbsp;&nbsp;" + m.time + "</font>";
-            // 气泡旁头像(仿微信):对方在左、自己在右;无头像用默认灰色人形
-            String av = "<img src=\"" + avatarFileOf(m.sender).toURI() + "\" width=\"28\" height=\"28\">";
+            // 气泡旁头像(仿微信):对方在左、自己在右;无头像用默认灰色人形。源图 128px 缩到 36px 显示,清晰
+            String av = "<img src=\"" + avatarFileOf(m.sender).toURI() + "\" width=\"36\" height=\"36\">";
             String msgCell = "<td align=\"" + align + "\">" + head + "<br>"
                  + "<table bgcolor=\"" + bub + "\" cellpadding=\"6\" cellspacing=\"0\"><tr><td>"
                  + "<font color=\"" + Theme.BUBTX + "\">" + Emotes.apply(m.body) + "</font>" // 短码→表情图(功能二十六)

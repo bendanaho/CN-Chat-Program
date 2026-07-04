@@ -490,7 +490,7 @@ public class BroadcastCommandParser implements CommandParser {
     private void setAvatar(ConnectedClient cc, StringTokenizer st) {
         if(!st.hasMoreTokens()) return;
         String b64 = st.nextToken();
-        if(b64.length() > 40000) { cc.sendMessage("头像过大,请选小一点的图片"); return; }
+        if(b64.length() > 300000) { cc.sendMessage("头像过大,请选小一点的图片"); return; } // 128px PNG 足够
         ds.addInfo(cc.nick, AVATAR_FIELD, b64);
         cc.getConnectionKeeper().broadcast("" + MainServer.PUSHMARKER + "AVATAR " + cc.nick + " " + b64);
     }
