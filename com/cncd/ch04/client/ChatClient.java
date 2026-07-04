@@ -361,6 +361,37 @@ public class ChatClient extends JFrame implements KeyListener, ActionListener, F
         Image im = javax.imageio.ImageIO.read(f);
         return new ImageIcon(im.getScaledInstance(20, 20, Image.SCALE_SMOOTH));
     }
+    // 某昵称的头像文件;没有则返回默认头像(灰色人形,首次生成)——供气泡旁显示
+    java.io.File avatarFileOf(String nick) {
+        if(nick != null) {
+            java.io.File f = new java.io.File(avatarDir, b64(nick.toLowerCase()) + ".png");
+            if(f.exists()) return f;
+        }
+        java.io.File d = new java.io.File(avatarDir, "_default.png");
+        if(!d.exists()) {
+            try {
+                avatarDir.mkdirs();
+                java.awt.image.BufferedImage im = new java.awt.image.BufferedImage(48, 48,
+                    java.awt.image.BufferedImage.TYPE_INT_RGB);
+                Graphics2D g = im.createGraphics();
+                g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
+                g.setColor(new Color(0xb8, 0xc0, 0xc8));
+                g.fillRect(0, 0, 48, 48);
+                g.setColor(Color.white);
+                g.fillOval(15, 8, 18, 18);   // 头
+                g.fillOval(8, 28, 32, 26);   // 肩
+                g.dispose();
+                javax.imageio.ImageIO.write(im, "png", d);
+            } catch(Exception e) {}
+        }
+        return d;
+    }
+    // 句首是否为表情短码(如 /微笑):是则按聊天发送而不是命令(功能二十六修复)
+    private boolean startsWithEmote(String s) {
+        for(int i = 0; i < Emotes.NAMES.length; i++)
+            if(s.startsWith("/" + Emotes.NAMES[i])) return true;
+        return false;
+    }
     // 选图→缩放到 48x48 PNG→Base64 上传(几 KB,单条消息即可承载)
     private void chooseAvatar() {
         if(ck == null || !ck.isConnected()) { addMsg("<font color=\"" + Theme.ERR + "\">请先连接服务器</font>"); return; }
@@ -729,6 +760,9 @@ public class ChatClient extends JFrame implements KeyListener, ActionListener, F
                 avatars.put(nick.toLowerCase(), scaledIcon(f));
                 userList.repaint();
                 convList.repaint();
+                // 气泡旁头像即时生效:重渲染所有会话窗格
+                Iterator hit = convs.values().iterator();
+                while(hit.hasNext()) ((ClientHistory)(hit.next())).renderAll();
             } catch(Exception e) {}
         } else if(cmd.startsWith("SHAKE ")) {
             // 窗口抖动(功能二十四)
@@ -1285,12 +1319,14 @@ public class ChatClient extends JFrame implements KeyListener, ActionListener, F
             while(st.hasMoreTokens()) last = st.nextToken();
             if(last != null && !last.startsWith("/")) lastPassword = last;
         }
-        // 会话感知:命令原样发;群组会话→/room;私聊会话→/msg;公共聊天室→原样广播
+        // 会话感知:命令原样发;群组会话→/room;私聊会话→/msg;公共聊天室→原样广播。
+        // 句首为表情短码(/微笑 等)不算命令,否则表情放句首会被当未知命令吞掉
+        boolean isCmd = toSend.startsWith("/") && !startsWithEmote(toSend);
         String wire;
-        if(toSend.startsWith("/")) wire = toSend;
+        if(isCmd) wire = toSend;
         else if(currentConv.startsWith("#")) wire = "/room " + currentConv.substring(1) + " " + toSend;
         else if(!MAIN_ROOM.equals(currentConv)) wire = "/msg " + currentConv + " " + toSend;
-        else wire = toSend;
+        else wire = toSend.startsWith("/") ? " " + toSend : toSend; // 前置空格防内核把表情当命令
         if(ck == null || !ck.isConnected()) {
             if(reconnecting) { // 断线重连中:进待发队列,恢复后补发
                 pendingOut.add(wire);
@@ -1498,12 +1534,16 @@ public class ChatClient extends JFrame implements KeyListener, ActionListener, F
             String recall = (self && m.rid > 0) ? "&nbsp;<font size=\"2\"><a href=\"recall:" + m.rid + "\">撤回</a></font>" : "";
             String head = self ? "<font color=\"" + Theme.TIME + "\" size=\"2\">" + m.time + recall + "</font>"
                                : "<font color=\"" + Theme.TIME + "\" size=\"2\">" + m.sender + "&nbsp;&nbsp;" + m.time + "</font>";
-            // 外层表定对齐,内层表着色即为"气泡"(Swing HTML 无圆角,以底色+留白模拟)
-            return "<table width=\"100%\" cellpadding=\"3\"><tr><td align=\"" + align + "\">"
-                 + head + "<br>"
+            // 气泡旁头像(仿微信):对方在左、自己在右;无头像用默认灰色人形
+            String av = "<img src=\"" + avatarFileOf(m.sender).toURI() + "\" width=\"28\" height=\"28\">";
+            String msgCell = "<td align=\"" + align + "\">" + head + "<br>"
                  + "<table bgcolor=\"" + bub + "\" cellpadding=\"6\" cellspacing=\"0\"><tr><td>"
                  + "<font color=\"" + Theme.BUBTX + "\">" + Emotes.apply(m.body) + "</font>" // 短码→表情图(功能二十六)
-                 + "</td></tr></table></td></tr></table>";
+                 + "</td></tr></table></td>";
+            String avCell = "<td width=\"34\" valign=\"top\">" + av + "</td>";
+            return "<table width=\"100%\" cellpadding=\"3\"><tr>"
+                 + (self ? msgCell + avCell : avCell + msgCell)
+                 + "</tr></table>";
         }
         public void renderAll() {
             setBackground(Theme.chatBgColor());
