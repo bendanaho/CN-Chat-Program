@@ -41,6 +41,7 @@ public class ChatClient extends JFrame implements KeyListener, ActionListener, F
     String lastPassword;               // 缓存最近一次 /register 或 /verify 的密码,重连自动验证身份用
     String myNick = "";                // 服务器确认的"我的昵称",判断消息归属用(比可编辑的 txtNick 可靠)
     HashMap recvs = new HashMap();     // 分块接收中的文件:tid -> FileRecv(功能十二)
+    HashMap fileMsgId = new HashMap();  // 发送中的文件:tid -> 服务器分配的消息 ID(供撤回,功能二十)
     private static int tidCounter = 0;
     private String rawInfoHtml = "";   // 右栏信息的原始(带颜色占位符)HTML,切主题时重渲染
     Vector rooms = new Vector();        // 我加入的群组(功能十七)
@@ -278,21 +279,10 @@ public class ChatClient extends JFrame implements KeyListener, ActionListener, F
         });
         loadAvatarCache();
         // 拖拽发送(功能二十五):把文件拖进聊天区即发送到当前会话
-        new java.awt.dnd.DropTarget(centerCards, new java.awt.dnd.DropTargetAdapter() {
-            public void drop(java.awt.dnd.DropTargetDropEvent ev) {
-                try {
-                    ev.acceptDrop(java.awt.dnd.DnDConstants.ACTION_COPY);
-                    java.util.List fs = (java.util.List)ev.getTransferable()
-                        .getTransferData(java.awt.datatransfer.DataFlavor.javaFileListFlavor);
-                    if(ck == null || !ck.isConnected()) { addMsg("<font color=\"" + Theme.ERR + "\">请先连接服务器</font>"); return; }
-                    String target = MAIN_ROOM.equals(currentConv) ? "*" : currentConv;
-                    for(int i=0;i<fs.size();i++) {
-                        java.io.File f = (java.io.File)fs.get(i);
-                        if(f.isFile() && f.length() <= 200L*1024*1024) sendFileChunked(target, f);
-                    }
-                } catch(Exception ex) {}
-            }
-        });
+        // 注意:真正显示聊天的 JEditorPane 有自己的拖放处理会吞掉 drop 事件,
+        // 所以 DropTarget 必须挂到每个聊天面板(ClientHistory)上,见 attachDrop()——
+        // 这里同时给外层容器挂一个,覆盖面板之外(如滚动条区)的拖放。
+        attachDrop(centerCards);
         setupTray(); // 系统托盘(功能二十四)
         applyTheme();     // 启动即按用户上次选择的主题渲染
     }
@@ -417,7 +407,7 @@ public class ChatClient extends JFrame implements KeyListener, ActionListener, F
             if(s.startsWith("/" + Emotes.NAMES[i])) return true;
         return false;
     }
-    // 选图→缩放到 48x48 PNG→Base64 上传(几 KB,单条消息即可承载)
+    // 选图→缩放到 128x128 PNG(铺白底防透明变黑)→Base64 上传(几 KB,单条消息即可承载)
     private void chooseAvatar() {
         if(ck == null || !ck.isConnected()) { addMsg("<font color=\"" + Theme.ERR + "\">请先连接服务器</font>"); return; }
         JFileChooser fc = new JFileChooser();
@@ -509,21 +499,29 @@ public class ChatClient extends JFrame implements KeyListener, ActionListener, F
         java.io.File[] cs = Emotes.customs();
         for(int i = 0; i < cs.length; i++) {
             final java.io.File cf = cs[i];
-            try {
-                Image im = javax.imageio.ImageIO.read(cf);
-                if(im == null) continue;
-                JButton b = new JButton(new ImageIcon(im.getScaledInstance(28, 28, Image.SCALE_SMOOTH)));
-                b.setToolTipText("自定义表情(点击发送)");
-                b.setMargin(new Insets(2,2,2,2));
-                b.addActionListener(new ActionListener() {
-                    public void actionPerformed(ActionEvent ev) {
-                        if(ck != null && ck.isConnected())
-                            sendFileChunked(MAIN_ROOM.equals(currentConv) ? "*" : currentConv, cf);
+            ImageIcon ic = customEmoteIcon(cf); // 走缓存,避免每次开面板都重读磁盘图片
+            if(ic == null) continue;
+            JButton b = new JButton(ic);
+            b.setToolTipText("点击发送 · 右键删除");
+            b.setMargin(new Insets(2,2,2,2));
+            b.addActionListener(new ActionListener() {
+                public void actionPerformed(ActionEvent ev) {
+                    if(ck != null && ck.isConnected())
+                        sendFileChunked(MAIN_ROOM.equals(currentConv) ? "*" : currentConv, cf);
+                    menuHide();
+                }
+            });
+            b.addMouseListener(new java.awt.event.MouseAdapter() { // 右键删除自己上传的表情
+                public void mousePressed(java.awt.event.MouseEvent me) {
+                    if(javax.swing.SwingUtilities.isRightMouseButton(me)) {
                         menuHide();
+                        int r = JOptionPane.showConfirmDialog(ChatClient.this,
+                            "删除这个自定义表情?", "删除表情", JOptionPane.YES_NO_OPTION);
+                        if(r == JOptionPane.YES_OPTION) { Emotes.deleteCustom(cf); showEmoteMenu(); }
                     }
-                });
-                grid.add(b);
-            } catch(Exception e) {}
+                }
+            });
+            grid.add(b);
         }
         JButton add = new JButton("＋");
         add.setToolTipText("添加自定义表情(选一张图片)");
@@ -544,6 +542,21 @@ public class ChatClient extends JFrame implements KeyListener, ActionListener, F
         menu.show(buttonEmote, 0, -menu.getPreferredSize().height);
     }
     private JPopupMenu emoteMenu;
+    private java.util.HashMap emoteIconCache = new java.util.HashMap(); // 路径@修改时间 -> 缩略图,加速面板反复打开
+    // 取自定义表情的 28px 缩略图(带缓存):文件按"绝对路径@最后修改时间"做键,内容变了自然失效
+    private ImageIcon customEmoteIcon(java.io.File cf) {
+        String key = cf.getAbsolutePath() + "@" + cf.lastModified();
+        ImageIcon ic = (ImageIcon)emoteIconCache.get(key);
+        if(ic == null) {
+            try {
+                Image im = javax.imageio.ImageIO.read(cf);
+                if(im == null) return null;
+                ic = new ImageIcon(im.getScaledInstance(28, 28, Image.SCALE_SMOOTH));
+                emoteIconCache.put(key, ic);
+            } catch(Exception e) { return null; }
+        }
+        return ic;
+    }
     private void menuHide() { if(emoteMenu != null) emoteMenu.setVisible(false); }
     // ===== 本地聊天记录(功能二十一,按身份隔离) =====
     private String b64(String s) {
@@ -604,8 +617,8 @@ public class ChatClient extends JFrame implements KeyListener, ActionListener, F
     }
     private void setThemeButtonText() {
         // 图标放大到 30pt、文字放大到 16pt
-        buttonTheme.setText("<html><center><font size=\"7\">" + (Theme.isDark() ? "☀" : "☾")
-                + "</font><br><font size=\"5\">" + (Theme.isDark() ? "日间" : "夜间") + "</font></center></html>");
+        buttonTheme.setText("<html><center><font size=\"7\">" + (Theme.isDark() ? "☾" : "☀")
+                + "</font><br><font size=\"5\">" + (Theme.isDark() ? "夜间" : "日间") + "</font></center></html>");
         buttonTheme.setToolTipText("切换日间/夜间模式");
     }
     // ===== 主题(功能十四):遍历组件树刷色 + 各会话窗格整体重渲染 =====
@@ -652,23 +665,44 @@ public class ChatClient extends JFrame implements KeyListener, ActionListener, F
                 ds.setBroadcast(true);
                 ds.setSoTimeout(2500);
                 byte[] q = "CHAT_DISCOVER".getBytes("UTF-8");
-                ds.send(new java.net.DatagramPacket(q, q.length,
-                        java.net.InetAddress.getByName("255.255.255.255"), 3600));
+                // 多网卡环境(装了 VMware/虚拟机等)下,只发 255.255.255.255 会从某一块网卡出去,
+                // 可能不是连热点的那块 → 服务器收不到。这里枚举每块网卡的子网广播地址逐个发,
+                // 再补一份全局广播兜底,确保探测包能到达连着热点的那块网卡。
+                java.util.ArrayList bcasts = new java.util.ArrayList();
+                try {
+                    java.util.Enumeration nis = java.net.NetworkInterface.getNetworkInterfaces();
+                    while(nis.hasMoreElements()) {
+                        java.net.NetworkInterface ni = (java.net.NetworkInterface)nis.nextElement();
+                        if(!ni.isUp() || ni.isLoopback()) continue;
+                        java.util.Iterator it = ni.getInterfaceAddresses().iterator();
+                        while(it.hasNext()) {
+                            java.net.InterfaceAddress ia = (java.net.InterfaceAddress)it.next();
+                            java.net.InetAddress b = ia.getBroadcast(); // 仅 IPv4 有子网广播地址
+                            if(b != null) bcasts.add(b);
+                        }
+                    }
+                } catch(Exception ig) {}
+                try { bcasts.add(java.net.InetAddress.getByName("255.255.255.255")); } catch(Exception ig) {}
+                for(int i = 0; i < bcasts.size(); i++) {
+                    try { ds.send(new java.net.DatagramPacket(q, q.length,
+                            (java.net.InetAddress)bcasts.get(i), 3600)); } catch(Exception ig) {}
+                }
                 byte[] buf = new byte[128];
                 java.net.DatagramPacket rp = new java.net.DatagramPacket(buf, buf.length);
                 ds.receive(rp); // 等第一个应答
                 String resp = new String(rp.getData(), 0, rp.getLength(), "UTF-8").trim();
                 ds.close();
                 if(resp.startsWith("CHAT_SERVER ")) {
-                    String ip = rp.getAddress().getHostAddress();
-                    String port = resp.substring(12).trim();
-                    txtHost.setText(ip);
-                    txtPort.setText(port);
+                    final String ip = rp.getAddress().getHostAddress();
+                    final String port = resp.substring(12).trim();
+                    SwingUtilities.invokeLater(new Runnable() { public void run() {
+                        txtHost.setText(ip); txtPort.setText(port);
+                    }});
                     addMsg("<font color=\"" + Theme.OK + "\">发现服务器 " + ip + ":" + port
                             + ",已自动填入,点 Connect 连接</font>");
                 }
             } catch(java.net.SocketTimeoutException te) {
-                addMsg("<font color=\"" + Theme.ERR + "\">未发现服务器(请确认服务器已启动且在同一局域网)</font>");
+                addMsg("<font color=\"" + Theme.ERR + "\">未发现服务器(请确认服务器已启动、在同一局域网,且服务器机已放行 UDP 3600 入站)</font>");
             } catch(Exception ex) {
                 addMsg("<font color=\"" + Theme.ERR + "\">扫描失败: " + ex.getMessage() + "</font>");
             }
@@ -774,6 +808,12 @@ public class ChatClient extends JFrame implements KeyListener, ActionListener, F
             sentPm.put(t[0], new String[]{ t[1], t[2] }); // 存正文,收到 READ 时改为"已读"
             ensureConv(t[1]).putMsg("m" + t[0], ClientHistory.SELF, txtNick.getText().trim(),
                     t[2] + " <font size=\"2\" color=\"" + Theme.TIME + "\">· 已送达</font>");
+        } else if(cmd.startsWith("PMOFF ")) {
+            // 发给离线好友的私聊回显(功能十六):自己的消息照常靠右显示,状态标注"已暂存"
+            String[] t = split3(cmd.substring(6));
+            if(t == null) return;
+            ensureConv(t[1]).putMsg("m" + t[0], ClientHistory.SELF, txtNick.getText().trim(),
+                    t[2] + " <font size=\"2\" color=\"" + Theme.WARN + "\">· 已暂存,对方上线后送达</font>");
         } else if(cmd.startsWith("LOST")) {
             // 断线(功能十一):系统提示 + 自动重连
             appendTo(MAIN_ROOM, "<font color=\"" + Theme.ERR + "\">与服务器的连接已断开,自动重连中...</font>");
@@ -784,6 +824,10 @@ public class ChatClient extends JFrame implements KeyListener, ActionListener, F
             fileChunk(cmd.substring(7));
         } else if(cmd.startsWith("FEND ")) {
             fileEnd(cmd.substring(5).trim());
+        } else if(cmd.startsWith("FID ")) {
+            // 服务器回传本次文件传输的消息 ID(功能二十):发送方据此给文件气泡挂撤回能力
+            int sp = cmd.indexOf(' ', 4);
+            if(sp > 0) try { fileMsgId.put(cmd.substring(4, sp), Long.valueOf(cmd.substring(sp + 1).trim())); } catch(Exception e) {}
         } else if(cmd.startsWith("FILEP ")) {
             receiveFile(cmd.substring(6), null); // 旧版单包文件(兼容保留)
         } else if(cmd.startsWith("FILE ")) {
@@ -869,7 +913,7 @@ public class ChatClient extends JFrame implements KeyListener, ActionListener, F
             int sp = cmd.indexOf(' ', 7);
             String id = (sp < 0) ? cmd.substring(7).trim() : cmd.substring(7, sp);
             String who = (sp < 0) ? "对方" : cmd.substring(sp + 1);
-            recallEverywhere("m" + id, who);
+            try { recallEverywhere(Long.parseLong(id), who); } catch(Exception e) {}
         }
     }
     // 把 "a b 其余部分" 切成三段(前两段无空格,第三段可含任意内容)
@@ -900,10 +944,10 @@ public class ChatClient extends JFrame implements KeyListener, ActionListener, F
         typingClearTimer.setRepeats(false);
         typingClearTimer.start();
     }
-    // 撤回(功能二十):同一条消息可能在多个会话窗格出现,逐一替换为撤回占位
-    private void recallEverywhere(String key, String who) {
+    // 撤回(功能二十):同一条消息可能在多个会话窗格出现,逐一按消息 ID 替换为撤回占位
+    private void recallEverywhere(long id, String who) {
         Iterator it = convs.values().iterator();
-        while(it.hasNext()) ((ClientHistory)(it.next())).recall(key, who);
+        while(it.hasNext()) ((ClientHistory)(it.next())).recall(id, who);
     }
     // ===== 注册 / 登录界面(账号体系 UI 化) =====
     // 弹框填用户名+密码 → 未连接则先连,再发 /register(注册即以该名登录)
@@ -961,6 +1005,10 @@ public class ChatClient extends JFrame implements KeyListener, ActionListener, F
     private String buildFileHtml(java.io.File out, String fname) {
         String lower = fname.toLowerCase();
         String uri = "" + out.toURI();
+        // 自定义表情(功能二十六):渲染成内嵌小图,不走"[图片] xxx（查看原图）"的大图形式,观感与内置表情一致
+        if(Emotes.isEmoteName(fname)) {
+            return "<img src=\"" + uri + "\"" + imgSizeAttr(out, 100) + ">";
+        }
         if(lower.endsWith(".png") || lower.endsWith(".jpg")
             || lower.endsWith(".jpeg") || lower.endsWith(".gif")) {
             return "<font color=\"" + Theme.PRIV + "\">[图片] " + fname
@@ -1005,18 +1053,19 @@ public class ChatClient extends JFrame implements KeyListener, ActionListener, F
     // ===== 分块文件接收(功能十二):FSTART 建档开流 → FCHUNK 顺序落盘+进度 → FEND 定稿展示 =====
     static class FileRecv {
         String sender, fname, pane;
-        long size;
+        long size, rid = -1; // rid=服务器分配的消息 ID,供撤回(功能二十)
         int count, got, lastPct = -1;
         java.io.File out;
         java.io.FileOutputStream os;
     }
     private void fileStart(String rest) {
-        try { // FSTART <发送者> <P|B> <tid> <文件名> <大小> <块数>
+        try { // FSTART <发送者> <P|B> <tid> <id> <文件名> <大小> <块数>
             StringTokenizer st = new StringTokenizer(rest);
             FileRecv r = new FileRecv();
             r.sender = st.nextToken();
             String scope = st.nextToken();
             String tid = st.nextToken();
+            try { r.rid = Long.parseLong(st.nextToken()); } catch(Exception e) {} // 撤回用的消息 ID
             r.fname = st.nextToken().replace('\\', '_').replace('/', '_'); // 防目录穿越
             r.size = Long.parseLong(st.nextToken());
             r.count = Integer.parseInt(st.nextToken());
@@ -1055,7 +1104,7 @@ public class ChatClient extends JFrame implements KeyListener, ActionListener, F
             r.os.close();
             String warn = (r.out.length() != r.size)
                 ? "<font color=\"" + Theme.ERR + "\">(大小不符,可能不完整)</font>" : "";
-            ensureConv(r.pane).putMsg(tid, ClientHistory.OTHER, r.sender, buildFileHtml(r.out, r.fname) + warn);
+            ensureConv(r.pane).putMsgId(tid, ClientHistory.OTHER, r.sender, buildFileHtml(r.out, r.fname) + warn, r.rid);
             markUnread(r.pane);
         } catch(Exception ex) {}
     }
@@ -1214,11 +1263,12 @@ public class ChatClient extends JFrame implements KeyListener, ActionListener, F
         menu.show(convList, e.getX(), e.getY());
     }
     // 计算 <img> 的等比缩略尺寸属性（240px 上限）；发送与接收两侧共用
-    private String imgSizeAttr(java.io.File imgFile) {
+    private String imgSizeAttr(java.io.File imgFile) { return imgSizeAttr(imgFile, 240); }
+    private String imgSizeAttr(java.io.File imgFile, int cap) {
         try {
             java.awt.image.BufferedImage bi = javax.imageio.ImageIO.read(imgFile);
             if(bi != null) {
-                double sc = Math.min(1.0, 240.0 / Math.max(bi.getWidth(), bi.getHeight()));
+                double sc = Math.min(1.0, (double)cap / Math.max(bi.getWidth(), bi.getHeight()));
                 return " width=\"" + (int)(bi.getWidth()*sc) + "\" height=\"" + (int)(bi.getHeight()*sc) + "\"";
             }
         } catch(Exception ig) {}
@@ -1230,6 +1280,24 @@ public class ChatClient extends JFrame implements KeyListener, ActionListener, F
         return tag + buildFileHtml(f, fname);
     }
     // ===== 分块发送(功能十二):切块编号,块间隙让聊天消息插队(交织发送),双侧实时进度 =====
+    // 把"拖文件进来即发送到当前会话"的处理装到指定组件上(功能二十五)
+    void attachDrop(java.awt.Component comp) {
+        new java.awt.dnd.DropTarget(comp, new java.awt.dnd.DropTargetAdapter() {
+            public void drop(java.awt.dnd.DropTargetDropEvent ev) {
+                try {
+                    ev.acceptDrop(java.awt.dnd.DnDConstants.ACTION_COPY);
+                    java.util.List fs = (java.util.List)ev.getTransferable()
+                        .getTransferData(java.awt.datatransfer.DataFlavor.javaFileListFlavor);
+                    if(ck == null || !ck.isConnected()) { addMsg("<font color=\"" + Theme.ERR + "\">请先连接服务器</font>"); return; }
+                    String target = MAIN_ROOM.equals(currentConv) ? "*" : currentConv;
+                    for(int i=0;i<fs.size();i++) {
+                        java.io.File f = (java.io.File)fs.get(i);
+                        if(f.isFile() && f.length() <= 200L*1024*1024) sendFileChunked(target, f);
+                    }
+                } catch(Exception ex) {}
+            }
+        });
+    }
     void sendFileChunked(final String target, final java.io.File f) {
         final String fname = f.getName().replace(' ', '_');
         final String tid = "t" + System.currentTimeMillis() + "_" + (++tidCounter);
@@ -1253,7 +1321,7 @@ public class ChatClient extends JFrame implements KeyListener, ActionListener, F
                     while(ck.pendingCount() > 1) { try { Thread.sleep(15); } catch(Exception e) {} }
                     ck.sendMessage("/fchunk " + tid + " " + i + " " + Base64.getEncoder().encodeToString(part));
                     int pct = (int)((i + 1) * 100L / count);
-                    if(pct != lastPct) { // 进度只在百分比变化时重绘
+                    if(pct != lastPct && !Emotes.isEmoteName(fname)) { // 进度只在百分比变化时重绘;自定义表情太小,不显示进度直接出图
                         lastPct = pct;
                         final int fp = pct;
                         ensureConv(pane).putMsg(tid, ClientHistory.SELF, txtNick.getText().trim(),
@@ -1263,7 +1331,14 @@ public class ChatClient extends JFrame implements KeyListener, ActionListener, F
                 }
                 in.close();
                 ck.sendMessage("/fend " + tid);
-                ensureConv(pane).putMsg(tid, ClientHistory.SELF, txtNick.getText().trim(), buildSentHtml(target, f, fname));
+                // 等服务器回传本次传输的消息 ID(FID),给文件气泡挂上撤回能力(功能二十)。
+                // FID 在 fstart 后立即下发,通常早于此处;最多等 1 秒,拿不到则退化为不可撤回。
+                for(int w = 0; w < 50 && !fileMsgId.containsKey(tid); w++) { try { Thread.sleep(20); } catch(Exception e) {} }
+                Long fid = (Long)fileMsgId.remove(tid);
+                if(fid != null)
+                    ensureConv(pane).putMsgId(tid, ClientHistory.SELF, txtNick.getText().trim(), buildSentHtml(target, f, fname), fid.longValue());
+                else
+                    ensureConv(pane).putMsg(tid, ClientHistory.SELF, txtNick.getText().trim(), buildSentHtml(target, f, fname));
             } catch(Exception ex) {
                 appendTo(MAIN_ROOM, "<font color=\"" + Theme.ERR + "\">发送文件失败: " + ex.getMessage() + "</font>");
             }
@@ -1551,12 +1626,24 @@ public class ChatClient extends JFrame implements KeyListener, ActionListener, F
                     catch(Exception ex) { System.out.println("open link: " + ex.getMessage()); }
                 }
             });
+            attachDrop(this); // 拖文件到本聊天面板即发送(JEditorPane 会吞事件,故逐面板挂,功能二十五)
             renderAll();
         }
         private String now() { return new java.text.SimpleDateFormat("HH:mm").format(new java.util.Date()); }
         public void addSystem(String body) { add(null, SYS, null, body); }
         // 带键追加/原位更新:同键第二次调用替换原消息(文件进度、撤回/回执)
         public void putMsg(String key, int type, String sender, String body) { add(key, type, sender, body); }
+        // 同上,并显式挂一个可撤回的消息 ID —— 文件/图片/表情的键是 tid(非 m<id>),
+        // add() 不会从键里解析出 rid,故这里补设(功能二十:让文件也能撤回)
+        public void putMsgId(String key, int type, String sender, String body, long rid) {
+            add(key, type, sender, body);
+            Integer i = (key == null) ? null : (Integer)keyIdx.get(key);
+            if(i != null && rid > 0) {
+                ((Msg)msgs.get(i.intValue())).rid = rid;
+                renderAll();
+                if(!loading) saveHistory(convName, this);
+            }
+        }
         private void add(String key, int type, String sender, String body) {
             Integer i = (key == null) ? null : (Integer)keyIdx.get(key);
             Msg m;
@@ -1575,15 +1662,19 @@ public class ChatClient extends JFrame implements KeyListener, ActionListener, F
             renderAll();
             if(!loading) saveHistory(convName, this); // 落盘(功能二十一)
         }
-        // 撤回:把带该键的消息替换为居中的撤回占位(功能二十)
-        public void recall(String key, String who) {
-            Integer i = (Integer)keyIdx.get(key);
-            if(i == null) return;
-            Msg m = (Msg)msgs.get(i.intValue());
-            m.type = SYS; m.rid = -1;
-            m.body = who + " 撤回了一条消息";
-            renderAll();
-            saveHistory(convName, this);
+        // 撤回:按消息 ID 找到该条(文字与文件统一走 rid),替换为居中的撤回占位(功能二十)
+        public void recall(long id, String who) {
+            if(id <= 0) return;
+            boolean changed = false;
+            for(int k = 0; k < msgs.size(); k++) {
+                Msg m = (Msg)msgs.get(k);
+                if(m.rid == id) {
+                    m.type = SYS; m.rid = -1;
+                    m.body = who + " 撤回了一条消息";
+                    changed = true;
+                }
+            }
+            if(changed) { renderAll(); saveHistory(convName, this); }
         }
         // 序列化非系统消息(每行:类型发送者时间rid正文)
         String serialize() {

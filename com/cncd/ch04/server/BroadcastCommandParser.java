@@ -183,7 +183,9 @@ public class BroadcastCommandParser implements CommandParser {
         } else if(ds.isRegistered(user)) {
             // 对方离线但已注册 → 存为离线消息,上线验证身份后补发(功能十六)
             ds.addOffline(user, cc.nick, body);
-            cc.sendMessage("<font color=\"#9933cc\">[离线消息] " + user + " 当前不在线,消息已暂存,对方上线后送达</font>");
+            // 给发送方回一条离线回显 PMOFF:与在线时的 PMSENT 一样在会话里显示自己发的气泡,
+            // 只是状态标注"已暂存,对方上线后送达"(此前只回纯文本提示,发送方看不到自己发的消息)
+            cc.sendMessage("" + MainServer.PUSHMARKER + "PMOFF " + id + " " + user + " " + body);
         }
         // 未注册的离线用户:sendTo 已提示 "Unable to find user"
     }
@@ -213,13 +215,20 @@ public class BroadcastCommandParser implements CommandParser {
         String target = st.nextToken(), tid = st.nextToken(), fname = st.nextToken();
         String size = st.nextToken(), count = st.nextToken();
         if(target.equalsIgnoreCase(cc.nick)) { cc.sendMessage("不能给自己发文件"); return; }
+        // 给这次文件传输分配消息 ID 并记录作用域(群发=*、私发=对方昵称),
+        // 使文件/图片/表情也能像文字消息一样撤回(功能二十);ID 随 FSTART 下发给接收方,
+        // 另用 FID 回传给发送方 —— 双方据此把文件气泡挂上可撤回的 ID。
+        long id = MainServer.nextMsgId();
+        String recallScope = target.equals("*") ? "*" : target;
+        MainServer.recordMsg(id, cc.nick, recallScope);
         String head = "" + MainServer.PUSHMARKER + "FSTART " + cc.nick + " ";
-        String tail = tid + " " + fname + " " + size + " " + count;
-        if(target.equals("*")) {
-            pushToOthers(cc, head + "B " + tail);
+        String tail = tid + " " + id + " " + fname + " " + size + " " + count;
+        boolean routed;
+        if(target.equals("*")) { pushToOthers(cc, head + "B " + tail); routed = true; }
+        else routed = cc.sendTo(target, head + "P " + tail);
+        if(routed) {
             synchronized(transfers) { transfers.put(tid, target); }
-        } else if(cc.sendTo(target, head + "P " + tail)) {
-            synchronized(transfers) { transfers.put(tid, target); }
+            cc.sendMessage("" + MainServer.PUSHMARKER + "FID " + tid + " " + id);
         }
     }
     private void fchunk(ConnectedClient cc, StringTokenizer st) {

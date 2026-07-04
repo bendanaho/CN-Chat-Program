@@ -94,9 +94,30 @@ public class Emotes {
         File[] fs = CUSTOM.listFiles();
         return fs == null ? new File[0] : fs;
     }
-    // 把一张图片收藏为自定义表情(拷入 custom 目录)
+    // 把一张图片收藏为自定义表情:缩放到 ≤96px 的小 PNG 存入 custom 目录。
+    // 缩小的意义:①面板加载快(读小图);②发送时体积只有几 KB,近乎瞬发;
+    // ③文件名统一加 emote_ 前缀,发送/接收端据此把它渲染成内嵌小表情而非"[图片]"大图。
     public static void addCustom(File img) throws Exception {
-        java.nio.file.Files.copy(img.toPath(),
-            new File(CUSTOM, System.currentTimeMillis() + "_" + img.getName()).toPath());
+        BufferedImage src = javax.imageio.ImageIO.read(img);
+        if(src == null) throw new Exception("不是有效的图片");
+        int max = Math.max(src.getWidth(), src.getHeight());
+        double sc = Math.min(1.0, 128.0 / max);
+        int w = Math.max(1, (int)(src.getWidth() * sc));
+        int h = Math.max(1, (int)(src.getHeight() * sc));
+        BufferedImage out = new BufferedImage(w, h, BufferedImage.TYPE_INT_ARGB);
+        Graphics2D g = out.createGraphics();
+        g.setRenderingHint(RenderingHints.KEY_INTERPOLATION, RenderingHints.VALUE_INTERPOLATION_BILINEAR);
+        g.drawImage(src, 0, 0, w, h, null);
+        g.dispose();
+        javax.imageio.ImageIO.write(out, "png",
+            new File(CUSTOM, "emote_" + System.currentTimeMillis() + ".png"));
+    }
+    // 删除一个自定义表情文件(功能二十六:管理自己上传的表情)
+    public static void deleteCustom(File f) {
+        try { if(f != null && f.getParentFile().equals(CUSTOM)) f.delete(); } catch(Exception e) {}
+    }
+    // 是否为自定义表情文件名(收发端据此渲染成内嵌小表情)
+    public static boolean isEmoteName(String fname) {
+        return fname != null && fname.startsWith("emote_");
     }
 }
