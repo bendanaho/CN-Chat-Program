@@ -49,6 +49,8 @@ public class ChatClient extends JFrame implements KeyListener, ActionListener, F
     JLabel statusBar, typingLabel, peerTitle; // 状态栏/正在输入/右栏标题(对方信息↔群成员)
     long lastTypingSent = 0;            // /typing 节流
     javax.swing.Timer typingClearTimer; // 定时清除"对方正在输入"
+    // 本地聊天记录(功能二十一):每个会话一个文件,重开程序回填
+    final java.io.File historyDir = new java.io.File(System.getProperty("user.home"), ".chattool-history");
     ClientKernel ck;
     ClientHistory historyWindow;
     private String lastMsg = "";
@@ -139,6 +141,7 @@ public class ChatClient extends JFrame implements KeyListener, ActionListener, F
         centerLayout = new CardLayout();
         centerCards = new JPanel(centerLayout);
         historyWindow = new ClientHistory(); // 公共聊天室窗格
+        historyWindow.convName = MAIN_ROOM;
         convs.put(MAIN_ROOM, historyWindow);
         sc = new JScrollPane(historyWindow);
         sc.setAutoscrolls(true);
@@ -212,7 +215,54 @@ public class ChatClient extends JFrame implements KeyListener, ActionListener, F
         westPanel.setPreferredSize(new Dimension(150, 0));
         this.add(westPanel, BorderLayout.WEST);
         rebuildConvList();
-        applyTheme(); // 启动即按用户上次选择的主题渲染
+        loadAllHistory(); // 回填上次的聊天记录(功能二十一)
+        applyTheme();     // 启动即按用户上次选择的主题渲染
+    }
+    // ===== 本地聊天记录(功能二十一) =====
+    private java.io.File histFile(String conv) {
+        try {
+            String enc = java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(conv.getBytes("UTF-8"));
+            return new java.io.File(historyDir, enc + ".txt"); // Base64 文件名安全承载中文/#等
+        } catch(Exception e) { return new java.io.File(historyDir, "x.txt"); }
+    }
+    // 某会话有新消息/更新时,把它的全部记录重写落盘(会话消息量小,整体重写简单可靠)
+    void saveHistory(String conv, ClientHistory h) {
+        if(conv == null) return;
+        try {
+            historyDir.mkdirs();
+            String s = h.serialize();
+            java.io.File f = histFile(conv);
+            if(s.length() == 0) { if(f.exists()) f.delete(); return; }
+            java.io.BufferedWriter w = new java.io.BufferedWriter(
+                new java.io.OutputStreamWriter(new java.io.FileOutputStream(f), "UTF-8"));
+            w.write(s); w.close();
+        } catch(Exception e) {}
+    }
+    private void loadAllHistory() {
+        java.io.File[] fs = historyDir.listFiles();
+        if(fs == null) return;
+        for(int i=0;i<fs.length;i++) {
+            String fn = fs[i].getName();
+            if(!fn.endsWith(".txt")) continue;
+            try {
+                String conv = new String(java.util.Base64.getUrlDecoder()
+                        .decode(fn.substring(0, fn.length()-4)), "UTF-8");
+                ClientHistory h = ensureConv(conv);
+                java.io.BufferedReader r = new java.io.BufferedReader(
+                    new java.io.InputStreamReader(new java.io.FileInputStream(fs[i]), "UTF-8"));
+                String line;
+                while((line = r.readLine()) != null) h.addLoaded(line);
+                r.close();
+                h.renderAll();
+            } catch(Exception e) {}
+        }
+        rebuildConvList();
+    }
+    private void clearHistory(String conv) {
+        ClientHistory h = (ClientHistory)convs.get(conv);
+        if(h != null) h.clear();
+        java.io.File f = histFile(conv);
+        if(f.exists()) f.delete();
     }
     // 统一风格的分组标题边框
     private Border titled(String t) {
@@ -585,6 +635,7 @@ public class ChatClient extends JFrame implements KeyListener, ActionListener, F
         ClientHistory h = (ClientHistory)convs.get(name);
         if(h == null) {
             h = new ClientHistory();
+            h.convName = name;
             convs.put(name, h);
             centerCards.add(new JScrollPane(h), name);
             // 非好友、且不是群组(#开头)的会话才算"临时会话"
@@ -712,7 +763,13 @@ public class ChatClient extends JFrame implements KeyListener, ActionListener, F
                 }
             });
             menu.add(del);
-        } else return; // 公共聊天室/临时会话/表头:无菜单
+        }
+        // 所有会话都可清空本地聊天记录(功能二十一)
+        JMenuItem clr = new JMenuItem("清空聊天记录");
+        clr.addActionListener(new ActionListener() {
+            public void actionPerformed(ActionEvent ev) { clearHistory(name); }
+        });
+        menu.add(clr);
         menu.show(convList, e.getX(), e.getY());
     }
     // 计算 <img> 的等比缩略尺寸属性（240px 上限）；发送与接收两侧共用
@@ -999,6 +1056,8 @@ public class ChatClient extends JFrame implements KeyListener, ActionListener, F
         class Msg { int type; String sender, body, time; long rid = -1; } // rid=可撤回的消息 id
         private Vector msgs = new Vector();
         private HashMap keyIdx = new HashMap(); // 消息键 -> 下标
+        String convName;             // 所属会话名(本地记录落盘用,功能二十一)
+        private boolean loading = false; // 回填历史时不重复落盘
         public ClientHistory() {
             super("text/html", "");
             setEditable(false);
@@ -1037,6 +1096,7 @@ public class ChatClient extends JFrame implements KeyListener, ActionListener, F
             }
             m.type = type; m.sender = sender; m.body = body;
             renderAll();
+            if(!loading) saveHistory(convName, this); // 落盘(功能二十一)
         }
         // 撤回:把带该键的消息替换为居中的撤回占位(功能二十)
         public void recall(String key, String who) {
@@ -1046,6 +1106,33 @@ public class ChatClient extends JFrame implements KeyListener, ActionListener, F
             m.type = SYS; m.rid = -1;
             m.body = who + " 撤回了一条消息";
             renderAll();
+            saveHistory(convName, this);
+        }
+        // 序列化非系统消息(每行:类型发送者时间rid正文)
+        String serialize() {
+            StringBuffer sb = new StringBuffer();
+            for(int i=0;i<msgs.size();i++) {
+                Msg m = (Msg)msgs.get(i);
+                if(m.type == SYS) continue; // 系统提示/撤回占位不入历史
+                if(sb.length() > 0) sb.append('\n');
+                sb.append(m.type).append('').append(m.sender == null ? "" : m.sender)
+                  .append('').append(m.time).append('').append(m.rid)
+                  .append('').append(m.body.replace('\n',' ').replace('\r',' '));
+            }
+            return sb.toString();
+        }
+        // 从历史行回填一条(不重新计时、不落盘)
+        void addLoaded(String line) {
+            String[] p = line.split("", 5);
+            if(p.length < 5) return;
+            Msg m = new Msg();
+            try { m.type = Integer.parseInt(p[0]); } catch(Exception e) { return; }
+            m.sender = p[1].length() == 0 ? null : p[1];
+            m.time = p[2];
+            try { m.rid = Long.parseLong(p[3]); } catch(Exception e) {}
+            m.body = p[4];
+            if(m.rid > 0) keyIdx.put("m" + m.rid, Integer.valueOf(msgs.size()));
+            msgs.add(m);
         }
         private String renderMsg(Msg m) {
             if(m.type == SYS) // 系统消息:居中、小字、弱化
