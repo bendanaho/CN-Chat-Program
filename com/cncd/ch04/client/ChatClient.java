@@ -1,5 +1,6 @@
 package com.cncd.ch04.client;
 import javax.swing.*;
+import javax.swing.event.*;
 import java.awt.*;
 import java.awt.event.*;
 import java.util.*;
@@ -134,14 +135,29 @@ public class ChatClient extends JFrame implements KeyListener, ActionListener, F
             if(out.exists()) out = new java.io.File(dir, System.currentTimeMillis() + "_" + fname);
             java.nio.file.Files.write(out.toPath(), data);
             String lower = fname.toLowerCase();
+            String uri = "" + out.toURI();
             if(lower.endsWith(".png") || lower.endsWith(".jpg")
                 || lower.endsWith(".jpeg") || lower.endsWith(".gif")) {
-                // 聊天区是 HTML 渲染，图片用 <img> 内嵌显示（文档要求⑥）
+                // 聊天区是 HTML 渲染，图片用 <img> 内嵌显示（文档要求⑥）。
+                // 按 240px 上限等比缩小成缩略图，避免大图撑爆聊天区；点链接看原图
+                String size = "";
+                try {
+                    java.awt.image.BufferedImage bi = javax.imageio.ImageIO.read(out);
+                    if(bi != null) {
+                        double sc = Math.min(1.0, 240.0 / Math.max(bi.getWidth(), bi.getHeight()));
+                        size = " width=\"" + (int)(bi.getWidth()*sc) + "\" height=\"" + (int)(bi.getHeight()*sc) + "\"";
+                    }
+                } catch(Exception ig) {}
                 addMsg("<font color=\"#9933cc\">[图片] 来自 " + sender + ": " + fname
-                        + "</font><br><img src=\"" + out.toURI() + "\">");
+                        + "</font>（<a href=\"" + uri + "\">查看原图</a>）<br><img src=\"" + uri + "\"" + size + ">");
+            } else if(lower.endsWith(".mp4") || lower.endsWith(".avi") || lower.endsWith(".mkv")
+                || lower.endsWith(".mov") || lower.endsWith(".wmv")) {
+                // 视频不做内嵌播放（JEditorPane 无 video 能力），点击调系统默认播放器
+                addMsg("<font color=\"#9933cc\">[视频] 来自 " + sender + ": " + fname
+                        + "（已保存，<a href=\"" + uri + "\">点击播放</a>）</font>");
             } else {
                 addMsg("<font color=\"#9933cc\">[文件] 来自 " + sender + ": " + fname
-                        + "（已保存到 " + out.getAbsolutePath() + "）</font>");
+                        + "（已保存到 " + out.getAbsolutePath() + "，<a href=\"" + uri + "\">打开</a>）</font>");
             }
         } catch(Exception ex) {
             addMsg("<font color=\"#ff0000\">接收文件失败: " + ex.getMessage() + "</font>");
@@ -222,8 +238,8 @@ public class ChatClient extends JFrame implements KeyListener, ActionListener, F
         JFileChooser fc = new JFileChooser();
         if(fc.showOpenDialog(this) != JFileChooser.APPROVE_OPTION) return;
         java.io.File f = fc.getSelectedFile();
-        if(f.length() > 5*1024*1024) {
-            addMsg("<font color=\"#ff0000\">文件过大（限 5MB）：" + f.getName() + "</font>");
+        if(f.length() > 20*1024*1024) { // 放宽到 20MB 以容纳短视频；单通道设计，传输期间该用户的聊天会短暂排队
+            addMsg("<font color=\"#ff0000\">文件过大（限 20MB）：" + f.getName() + "</font>");
             return;
         }
         try {
@@ -251,6 +267,15 @@ public class ChatClient extends JFrame implements KeyListener, ActionListener, F
             super("text/html", "" + ChatClient.appName);
             setEditable(false);
             setAutoscrolls(true);
+            // 点击聊天区里的链接（查看原图/播放视频/打开文件）→ 交给系统默认程序
+            addHyperlinkListener(new HyperlinkListener() {
+                public void hyperlinkUpdate(HyperlinkEvent e) {
+                    if(e.getEventType() == HyperlinkEvent.EventType.ACTIVATED) {
+                        try { Desktop.getDesktop().open(new java.io.File(e.getURL().toURI())); }
+                        catch(Exception ex) { System.out.println("open link: " + ex.getMessage()); }
+                    }
+                }
+            });
         }
         public void addText(String str) {
             String html = getText();
