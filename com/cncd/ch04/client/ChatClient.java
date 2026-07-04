@@ -31,6 +31,9 @@ public class ChatClient extends JFrame implements KeyListener, ActionListener, F
     HashSet unread = new HashSet();    // 有未读消息的会话
     String currentConv = MAIN_ROOM;
     JButton buttonScan, buttonTheme;   // 扫描局域网(功能十)、日夜主题切换(功能十四)
+    JPanel myInfoRows;                 // "我的信息"编辑区:行=(字段,内容)一对输入框
+    Vector infoFieldRows = new Vector(); // 元素为 JTextField[2]
+    JButton buttonAddRow, buttonSaveInfo;
     volatile boolean reconnecting = false; // 自动重连中(功能十一)
     Vector pendingOut = new Vector();  // 断线期间的待发消息,重连后补发
     String lastPassword;               // 缓存最近一次 /register 或 /verify 的密码,重连自动验证身份用
@@ -48,21 +51,42 @@ public class ChatClient extends JFrame implements KeyListener, ActionListener, F
     }
     public void uiInit() {
         setLayout(new BorderLayout());
-        //创建North
-        northPanel = new JPanel(new GridLayout(0,2));
-        northPanel.add(new JLabel("Host address:"));
-        northPanel.add(txtHost = new JTextField(ChatClient.serverText));
-        northPanel.add(new JLabel("Port:"));
-        northPanel.add(txtPort = new JTextField(ChatClient.portText));
-        northPanel.add(new JLabel("Nick:"));
-        northPanel.add(txtNick = new JTextField(ChatClient.nickText));
-        northPanel.add(buttonScan = new JButton("扫描局域网"));
-        northPanel.add(buttonTheme = new JButton(Theme.isDark() ? "日间模式" : "夜间模式"));
-        northPanel.add(new JLabel(""));
-        northPanel.add(buttonConnect = new JButton("Connect"));
+        //创建North:左=连接区,中=我的信息编辑区,右上角=主题小按钮
+        JPanel connPanel = new JPanel(new GridLayout(0,2,2,2));
+        connPanel.add(new JLabel("Host address:"));
+        connPanel.add(txtHost = new JTextField(ChatClient.serverText));
+        connPanel.add(new JLabel("Port:"));
+        connPanel.add(txtPort = new JTextField(ChatClient.portText));
+        connPanel.add(new JLabel("Nick:"));
+        connPanel.add(txtNick = new JTextField(ChatClient.nickText));
+        connPanel.add(buttonScan = new JButton("扫描局域网"));
+        connPanel.add(buttonConnect = new JButton("Connect"));
+        connPanel.setPreferredSize(new Dimension(300, 0));
+        // "我的信息":个人信息直接在主界面查看/修改(功能五的 UI 化)
+        myInfoRows = new JPanel(new GridLayout(0,2,2,2));
+        JPanel myInfoPanel = new JPanel(new BorderLayout());
+        JPanel infoHead = new JPanel(new BorderLayout());
+        infoHead.add(new JLabel("  我的信息(左=字段 右=内容;清空内容保存=删除该字段)"), BorderLayout.CENTER);
+        buttonTheme = new JButton(Theme.isDark() ? "日" : "夜"); // 主题切换缩成右上角小按钮
+        buttonTheme.setMargin(new Insets(0,6,0,6));
+        buttonTheme.setToolTipText("切换日间/夜间模式");
+        infoHead.add(buttonTheme, BorderLayout.EAST);
+        myInfoPanel.add(infoHead, BorderLayout.NORTH);
+        myInfoPanel.add(new JScrollPane(myInfoRows), BorderLayout.CENTER);
+        JPanel infoBtns = new JPanel(new FlowLayout(FlowLayout.RIGHT, 4, 1));
+        infoBtns.add(buttonAddRow = new JButton("再加一行"));
+        infoBtns.add(buttonSaveInfo = new JButton("保存信息"));
+        myInfoPanel.add(infoBtns, BorderLayout.SOUTH);
+        addInfoRow("", "");
+        northPanel = new JPanel(new BorderLayout(6, 0));
+        northPanel.add(connPanel, BorderLayout.WEST);
+        northPanel.add(myInfoPanel, BorderLayout.CENTER);
+        northPanel.setPreferredSize(new Dimension(0, 122));
         buttonConnect.addActionListener(this);
         buttonScan.addActionListener(this);
         buttonTheme.addActionListener(this);
+        buttonAddRow.addActionListener(this);
+        buttonSaveInfo.addActionListener(this);
         txtHost.addKeyListener(this);
         txtHost.addFocusListener(this);
         txtNick.addFocusListener(this);
@@ -158,7 +182,7 @@ public class ChatClient extends JFrame implements KeyListener, ActionListener, F
         while(it.hasNext()) ((ClientHistory)(it.next())).renderAll();
         infoPane.setText(Theme.apply(rawInfoHtml));
         infoPane.setBackground(Theme.bgColor());
-        buttonTheme.setText(Theme.isDark() ? "日间模式" : "夜间模式");
+        buttonTheme.setText(Theme.isDark() ? "日" : "夜");
         repaint();
     }
     private void themeWalk(Component c) {
@@ -583,6 +607,10 @@ public class ChatClient extends JFrame implements KeyListener, ActionListener, F
     private void showUserInfo(String rest) {
         int p = rest.indexOf(' ');
         String user = (p < 0) ? rest : rest.substring(0, p);
+        if(user.equalsIgnoreCase(txtNick.getText().trim())) { // 自己的信息 → 顶部"我的信息"编辑区
+            populateMyInfo(p < 0 ? "" : rest.substring(p + 1));
+            return;
+        }
         if(MAIN_ROOM.equals(currentConv) || !user.equalsIgnoreCase(currentConv)) return; // 只更新当前会话对象
         String html = "<b>" + user + "</b><br>";
         html += containsIgnoreCase(online, user) ? "<font color=\"" + Theme.OK + "\">[在线]</font><br>"
@@ -600,8 +628,55 @@ public class ChatClient extends JFrame implements KeyListener, ActionListener, F
     private void syncNick(String str) {
         String marker = "ou are now known as "; // 兼容 "You are..." 和 "...you are..." 两种回执
         int i = str.indexOf(marker);
-        if(str.startsWith("Server:") && i > 0)
+        if(str.startsWith("Server:") && i > 0) {
             txtNick.setText(str.substring(i + marker.length()).trim());
+            // 昵称确立即拉取自己的信息回填顶部编辑区
+            if(ck != null && ck.isConnected()) ck.sendMessage("/infoq " + txtNick.getText().trim());
+        }
+    }
+    // ===== "我的信息"编辑区(个人信息功能的界面化) =====
+    void addInfoRow(String field, String value) {
+        JTextField f = new JTextField(field);
+        JTextField v = new JTextField(value);
+        f.setBackground(Theme.bgColor()); f.setForeground(Theme.fgColor());
+        v.setBackground(Theme.bgColor()); v.setForeground(Theme.fgColor());
+        myInfoRows.add(f);
+        myInfoRows.add(v);
+        infoFieldRows.add(new JTextField[]{ f, v });
+        myInfoRows.revalidate();
+        myInfoRows.repaint();
+    }
+    // 保存:逐行下发——有字段有内容 /setinfo,有字段没内容 /delinfo;完成后重新拉取回填
+    private void saveMyInfo() {
+        if(ck == null || !ck.isConnected()) {
+            addMsg("<font color=\"" + Theme.ERR + "\">尚未连接服务器，请先点击 Connect</font>");
+            return;
+        }
+        for(int i=0;i<infoFieldRows.size();i++) {
+            JTextField[] row = (JTextField[])infoFieldRows.get(i);
+            String f = row[0].getText().trim().replace(' ', '_'); // 字段名在协议中是单个词
+            String v = row[1].getText().trim();
+            if(f.length() == 0) continue;
+            if(v.length() == 0) ck.sendMessage("/delinfo " + f);
+            else ck.sendMessage("/setinfo " + f + " " + v);
+        }
+        String n = txtNick.getText().trim();
+        if(n.length() > 0 && !n.equals(ChatClient.nickText))
+            ck.sendMessage("/infoq " + n); // FIFO 保证在上面的写操作之后处理,拿到的是最新状态
+    }
+    // 服务器推回自己的 USERINFO("字段: 值|字段: 值")→ 回填编辑区,末尾始终留一行空行
+    void populateMyInfo(String data) {
+        myInfoRows.removeAll();
+        infoFieldRows.clear();
+        if(data != null && data.trim().length() > 0) {
+            StringTokenizer st = new StringTokenizer(data, "|");
+            while(st.hasMoreTokens()) {
+                String t = st.nextToken();
+                int p = t.indexOf(": ");
+                if(p > 0) addInfoRow(t.substring(0, p).trim(), t.substring(p + 2));
+            }
+        }
+        addInfoRow("", "");
     }
     private void connect() {
         try {
@@ -711,6 +786,8 @@ public class ChatClient extends JFrame implements KeyListener, ActionListener, F
         if(e.getSource()==buttonFile) sendFile();
         if(e.getSource()==buttonScan) scanLan();
         if(e.getSource()==buttonTheme) { Theme.toggle(); applyTheme(); }
+        if(e.getSource()==buttonAddRow) addInfoRow("", "");
+        if(e.getSource()==buttonSaveInfo) saveMyInfo();
         if(e.getSource()==buttonAddFriend && !MAIN_ROOM.equals(currentConv)
             && ck != null && ck.isConnected())
             ck.sendMessage("/addfriend " + currentConv); // 右栏一键加好友，回执进公共聊天室
