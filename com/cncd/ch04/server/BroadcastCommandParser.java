@@ -30,6 +30,9 @@ public class BroadcastCommandParser implements CommandParser {
     private final String KICK = "kick", MUTE = "mute", UNMUTE = "unmute", ANNOUNCE = "announce"; // 管理(功能十八)
     private final String READ = "read", TYPING = "typing"; // 已读回执/正在输入(功能十九)
     private final String RECALL = "recall";   // 消息撤回(功能二十)
+    private final String AVATAR = "avatar";   // 头像上传(功能二十二):Base64 PNG,存保留字段并全服分发
+    private final String SHAKE = "shake";     // 窗口抖动(功能二十四)
+    private final String AVATAR_FIELD = "avatar"; // 头像在 DataSource 中的保留字段名
     private final String FRIEND_FIELD = "friends"; // 好友名单在 DataSource 中的保留字段名
         private final String tab = "&nbsp;&nbsp;&nbsp;";
     private DataSource ds;
@@ -115,6 +118,10 @@ public class BroadcastCommandParser implements CommandParser {
                     typing(cc, strTok);
                 else if(command.equalsIgnoreCase(RECALL))
                     recall(cc, strTok);
+                else if(command.equalsIgnoreCase(AVATAR))
+                    setAvatar(cc, strTok);
+                else if(command.equalsIgnoreCase(SHAKE))
+                    shake(cc, strTok);
             }
         } catch(Exception e) {
             System.out.println("CommandParser: " + e.getMessage());
@@ -263,6 +270,7 @@ public class BroadcastCommandParser implements CommandParser {
                 cc.getConnectionKeeper().broadcastUserList();
                 if(!str.equalsIgnoreCase(oldNick)) notifyFriendOnline(cc); // 同名重设不重复提醒
                 pushFriends(cc); // 昵称确立后下发自己的好友名单，供界面侧栏分组
+                pushAvatars(cc);
             } else
                 cc.sendMessage("nick " + str + " was allready taken");
             
@@ -301,6 +309,7 @@ public class BroadcastCommandParser implements CommandParser {
                 deliverOffline(cc);
                 pushRooms(cc);
                 pushFriends(cc);
+                pushAvatars(cc);
             } else {
                 cc.sendMessage("The username is allready taken");
             }
@@ -317,6 +326,7 @@ public class BroadcastCommandParser implements CommandParser {
             pushFriends(cc);
             deliverOffline(cc);
             pushRooms(cc);
+            pushAvatars(cc);
         } else {
             cc.nick = "" + cc.portNumber;
             cc.sendMessage("Invalid user/pass, your nick is set to " + cc.nick);
@@ -476,6 +486,32 @@ public class BroadcastCommandParser implements CommandParser {
         if(!st.hasMoreTokens()) return;
         pushToNick(cc, st.nextToken(), "" + MainServer.PUSHMARKER + "TYPING " + cc.nick);
     }
+    // ===== 头像(功能二十二):存保留字段,变更即全服分发;上线时双向同步 =====
+    private void setAvatar(ConnectedClient cc, StringTokenizer st) {
+        if(!st.hasMoreTokens()) return;
+        String b64 = st.nextToken();
+        if(b64.length() > 40000) { cc.sendMessage("头像过大,请选小一点的图片"); return; }
+        ds.addInfo(cc.nick, AVATAR_FIELD, b64);
+        cc.getConnectionKeeper().broadcast("" + MainServer.PUSHMARKER + "AVATAR " + cc.nick + " " + b64);
+    }
+    // 上线确立昵称时:把所有在线者的头像发给新人,把新人的头像发给所有人
+    private void pushAvatars(ConnectedClient cc) {
+        LinkedList users = cc.getConnectionKeeper().users();
+        Iterator it = users.iterator();
+        while(it.hasNext()) {
+            ConnectedClient u = (ConnectedClient)(it.next());
+            String av = ds.getInfo(u.getNick(), AVATAR_FIELD);
+            if(av != null) cc.sendMessage("" + MainServer.PUSHMARKER + "AVATAR " + u.getNick() + " " + av);
+        }
+        String mine = ds.getInfo(cc.nick, AVATAR_FIELD);
+        if(mine != null)
+            cc.getConnectionKeeper().broadcast("" + MainServer.PUSHMARKER + "AVATAR " + cc.nick + " " + mine);
+    }
+    // ===== 窗口抖动(功能二十四):转发给目标 =====
+    private void shake(ConnectedClient cc, StringTokenizer st) {
+        if(!st.hasMoreTokens()) return;
+        pushToNick(cc, st.nextToken(), "" + MainServer.PUSHMARKER + "SHAKE " + cc.nick);
+    }
     // ===== 消息撤回(功能二十) =====
     private void recall(ConnectedClient cc, StringTokenizer st) {
         if(!st.hasMoreTokens()) return;
@@ -502,6 +538,9 @@ public class BroadcastCommandParser implements CommandParser {
         String field = strTok.nextToken();
         if(field.equalsIgnoreCase(FRIEND_FIELD)) {
             cc.sendMessage(FRIEND_FIELD + " 为系统保留字段，好友请用 /addfriend 管理"); return;
+        }
+        if(field.equalsIgnoreCase(AVATAR_FIELD)) {
+            cc.sendMessage(AVATAR_FIELD + " 为系统保留字段，头像请用界面按钮设置"); return;
         }
         StringBuffer sb = new StringBuffer();
         while(strTok.hasMoreTokens()) {

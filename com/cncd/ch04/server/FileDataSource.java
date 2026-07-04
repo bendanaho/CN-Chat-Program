@@ -377,8 +377,9 @@ public class FileDataSource implements DataSource {
         Iterator it = infoList.iterator();
         while(it.hasNext()) {
             Info i = (Info)(it.next());
-            // friends 是好友功能的保留字段，不作为个人信息展示
-            if(i.user.equalsIgnoreCase(user) && !i.field.equalsIgnoreCase("friends"))
+            // friends/avatar 是保留字段(好友名单/头像)，不作为个人信息展示
+            if(i.user.equalsIgnoreCase(user) && !i.field.equalsIgnoreCase("friends")
+                && !i.field.equalsIgnoreCase("avatar"))
                 out.add(i.field + ": " + i.data);
         }
         return (String[])out.toArray(new String[0]);

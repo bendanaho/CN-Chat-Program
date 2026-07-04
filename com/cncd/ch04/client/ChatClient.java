@@ -53,6 +53,21 @@ public class ChatClient extends JFrame implements KeyListener, ActionListener, F
     // 本地聊天记录(功能二十一):按登录身份隔离,每个昵称一个子目录,每会话一个文件
     final java.io.File historyDir = new java.io.File(System.getProperty("user.home"), ".chattool-history");
     String historyOwner = "";          // 当前记录归属的身份(=登录昵称);空=未登录,不读写
+    // 头像(功能二十二)
+    HashMap avatars = new HashMap();   // 昵称(小写) -> ImageIcon(20px)
+    final java.io.File avatarDir = new java.io.File(System.getProperty("user.home"), ".chattool-avatars");
+    JButton buttonAvatar;
+    // 语音(功能二十三)
+    JButton buttonVoice;
+    javax.sound.sampled.TargetDataLine recLine;
+    java.io.ByteArrayOutputStream recBuf;
+    volatile boolean recording = false;
+    long recStart;
+    // 通知(功能二十四)
+    JCheckBox soundToggle;
+    java.awt.TrayIcon trayIcon;
+    // 表情(功能二十六)
+    JButton buttonEmote;
     ClientKernel ck;
     ClientHistory historyWindow;
     private String lastMsg = "";
@@ -85,8 +100,10 @@ public class ChatClient extends JFrame implements KeyListener, ActionListener, F
         infoPanel.setBorder(titled("个人资料(双击单元格编辑;内容留空并保存=删除该项)"));
         infoPanel.add(new JScrollPane(infoTable), BorderLayout.CENTER);
         JPanel infoBtns = new JPanel(new FlowLayout(FlowLayout.RIGHT, 4, 2));
+        infoBtns.add(buttonAvatar = new JButton("设置头像"));
         infoBtns.add(buttonAddRow = new JButton("＋ 加一项"));
         infoBtns.add(buttonSaveInfo = new JButton("保存资料"));
+        buttonAvatar.addActionListener(this);
         infoPanel.add(infoBtns, BorderLayout.SOUTH);
         infoModel.addRow(new Object[]{"",""});
         // 主题切换:醒目大按钮,竖在右侧
@@ -120,19 +137,32 @@ public class ChatClient extends JFrame implements KeyListener, ActionListener, F
         msgWindow = new JTextField();
         msgWindow.setFont(new Font("Microsoft YaHei", Font.PLAIN, 14));
         JPanel sendBtns = new JPanel(new FlowLayout(FlowLayout.RIGHT, 4, 0));
+        sendBtns.add(buttonEmote = new JButton("表情"));
+        sendBtns.add(buttonVoice = new JButton("按住说话"));
         sendBtns.add(buttonFile = new JButton("文件"));
         sendBtns.add(buttonSend = new JButton("发送"));
+        buttonEmote.addActionListener(this);
+        // 语音:按下开始录音,松开发送(功能二十三)
+        buttonVoice.addMouseListener(new MouseAdapter() {
+            public void mousePressed(MouseEvent e) { startRecording(); }
+            public void mouseReleased(MouseEvent e) { stopRecordingAndSend(); }
+        });
         southPanel.add(typingLabel, BorderLayout.NORTH);
         southPanel.add(msgWindow, BorderLayout.CENTER);
         southPanel.add(sendBtns, BorderLayout.EAST);
         buttonSend.addActionListener(this);
         buttonFile.addActionListener(this);
         msgWindow.addKeyListener(this);
-        // 网络状态栏(功能十五):贴在整个窗口最底部,每秒刷新
+        // 网络状态栏(功能十五) + 提示音开关(功能二十四):贴在整个窗口最底部
         statusBar = new JLabel(" 未连接");
         statusBar.setFont(new Font("Microsoft YaHei", Font.PLAIN, 11));
         statusBar.setBorder(BorderFactory.createEmptyBorder(1,6,1,6));
-        this.add(statusBar, BorderLayout.SOUTH);
+        soundToggle = new JCheckBox("提示音", true);
+        soundToggle.setFont(new Font("Microsoft YaHei", Font.PLAIN, 11));
+        JPanel statusPanel = new JPanel(new BorderLayout());
+        statusPanel.add(statusBar, BorderLayout.CENTER);
+        statusPanel.add(soundToggle, BorderLayout.EAST);
+        this.add(statusPanel, BorderLayout.SOUTH);
         new javax.swing.Timer(1000, new ActionListener() {
             public void actionPerformed(ActionEvent ev) {
                 statusBar.setText(ck != null && ck.isConnected() ? ck.statsLine()
@@ -217,8 +247,246 @@ public class ChatClient extends JFrame implements KeyListener, ActionListener, F
         westPanel.setPreferredSize(new Dimension(150, 0));
         this.add(westPanel, BorderLayout.WEST);
         rebuildConvList();
+        // 头像渲染器(功能二十二):在线用户与会话列表的名字前显示头像
+        userList.setCellRenderer(new DefaultListCellRenderer() {
+            public Component getListCellRendererComponent(JList l, Object v, int idx, boolean sel, boolean foc) {
+                JLabel lb = (JLabel)super.getListCellRendererComponent(l, v, idx, sel, foc);
+                Object ic = (v == null) ? null : avatars.get(v.toString().toLowerCase());
+                lb.setIcon(ic == null ? null : (Icon)ic);
+                return lb;
+            }
+        });
+        convList.setCellRenderer(new DefaultListCellRenderer() {
+            public Component getListCellRendererComponent(JList l, Object v, int idx, boolean sel, boolean foc) {
+                JLabel lb = (JLabel)super.getListCellRendererComponent(l, v, idx, sel, foc);
+                Icon ic = null;
+                if(idx >= 0 && idx < itemNames.size()) {
+                    Object name = itemNames.get(idx);
+                    if(name != null && !name.toString().startsWith("#")) {
+                        Object o = avatars.get(name.toString().toLowerCase());
+                        if(o != null) ic = (Icon)o;
+                    }
+                }
+                lb.setIcon(ic);
+                return lb;
+            }
+        });
+        loadAvatarCache();
+        // 拖拽发送(功能二十五):把文件拖进聊天区即发送到当前会话
+        new java.awt.dnd.DropTarget(centerCards, new java.awt.dnd.DropTargetAdapter() {
+            public void drop(java.awt.dnd.DropTargetDropEvent ev) {
+                try {
+                    ev.acceptDrop(java.awt.dnd.DnDConstants.ACTION_COPY);
+                    java.util.List fs = (java.util.List)ev.getTransferable()
+                        .getTransferData(java.awt.datatransfer.DataFlavor.javaFileListFlavor);
+                    if(ck == null || !ck.isConnected()) { addMsg("<font color=\"" + Theme.ERR + "\">请先连接服务器</font>"); return; }
+                    String target = MAIN_ROOM.equals(currentConv) ? "*" : currentConv;
+                    for(int i=0;i<fs.size();i++) {
+                        java.io.File f = (java.io.File)fs.get(i);
+                        if(f.isFile() && f.length() <= 200L*1024*1024) sendFileChunked(target, f);
+                    }
+                } catch(Exception ex) {}
+            }
+        });
+        setupTray(); // 系统托盘(功能二十四)
         applyTheme();     // 启动即按用户上次选择的主题渲染
     }
+    // ===== 系统托盘(功能二十四):最小化隐藏到托盘,来消息气泡提示,单击恢复 =====
+    private void setupTray() {
+        if(!java.awt.SystemTray.isSupported()) return;
+        try {
+            java.awt.image.BufferedImage im = new java.awt.image.BufferedImage(16, 16,
+                java.awt.image.BufferedImage.TYPE_INT_RGB);
+            Graphics2D g = im.createGraphics();
+            g.setColor(new Color(0x07, 0xc1, 0x60));
+            g.fillRect(0, 0, 16, 16);
+            g.setColor(Color.white);
+            g.drawString("C", 4, 12);
+            g.dispose();
+            trayIcon = new java.awt.TrayIcon(im, "Chat Tool");
+            trayIcon.addActionListener(new ActionListener() {
+                public void actionPerformed(ActionEvent e) {
+                    setVisible(true);
+                    setState(JFrame.NORMAL);
+                    toFront();
+                }
+            });
+            java.awt.SystemTray.getSystemTray().add(trayIcon);
+            addWindowListener(new WindowAdapter() {
+                public void windowIconified(WindowEvent e) { setVisible(false); } // 最小化→托盘
+            });
+        } catch(Exception e) {}
+    }
+    // 新消息注意力提示(功能二十四):提示音 + 未聚焦时任务栏闪烁/托盘气泡;@提及强提醒
+    private void notifyIncoming(String sender, String body, boolean mention) {
+        if(sender != null && isMe(sender)) return; // 自己发的不提醒
+        boolean focused = isFocused();
+        if(soundToggle.isSelected() && (!focused || mention)) Toolkit.getDefaultToolkit().beep();
+        if(!focused) {
+            toFront(); // Windows 下无法抢焦点时表现为任务栏闪烁
+            if(trayIcon != null && !isVisible())
+                trayIcon.displayMessage("新消息", sender + ": " + body.replaceAll("<[^>]*>", ""),
+                    java.awt.TrayIcon.MessageType.INFO);
+        }
+    }
+    // 窗口抖动(功能二十四):被抖时窗口小幅震动约半秒
+    void doShake() {
+        final Point p = getLocation();
+        final int[] n = {0};
+        final javax.swing.Timer t = new javax.swing.Timer(20, null);
+        t.addActionListener(new ActionListener() {
+            public void actionPerformed(ActionEvent e) {
+                n[0]++;
+                setLocation(p.x + ((n[0] % 4 < 2) ? 6 : -6), p.y + ((n[0] % 2 == 0) ? 4 : -4));
+                if(n[0] > 24) { t.stop(); setLocation(p); }
+            }
+        });
+        t.start();
+    }
+    // ===== 头像(功能二十二) =====
+    private void loadAvatarCache() { // 启动时从本地缓存恢复(离线也能显示已知头像)
+        java.io.File[] fs = avatarDir.listFiles();
+        if(fs == null) return;
+        for(int i=0;i<fs.length;i++) {
+            String fn = fs[i].getName();
+            if(!fn.endsWith(".png")) continue;
+            try {
+                String nick = new String(java.util.Base64.getUrlDecoder()
+                    .decode(fn.substring(0, fn.length()-4)), "UTF-8");
+                avatars.put(nick.toLowerCase(), scaledIcon(fs[i]));
+            } catch(Exception e) {}
+        }
+    }
+    private ImageIcon scaledIcon(java.io.File f) throws Exception {
+        Image im = javax.imageio.ImageIO.read(f);
+        return new ImageIcon(im.getScaledInstance(20, 20, Image.SCALE_SMOOTH));
+    }
+    // 选图→缩放到 48x48 PNG→Base64 上传(几 KB,单条消息即可承载)
+    private void chooseAvatar() {
+        if(ck == null || !ck.isConnected()) { addMsg("<font color=\"" + Theme.ERR + "\">请先连接服务器</font>"); return; }
+        JFileChooser fc = new JFileChooser();
+        if(fc.showOpenDialog(this) != JFileChooser.APPROVE_OPTION) return;
+        try {
+            Image src = javax.imageio.ImageIO.read(fc.getSelectedFile());
+            if(src == null) { addMsg("<font color=\"" + Theme.ERR + "\">不是有效的图片文件</font>"); return; }
+            java.awt.image.BufferedImage out = new java.awt.image.BufferedImage(48, 48,
+                java.awt.image.BufferedImage.TYPE_INT_RGB);
+            Graphics2D g = out.createGraphics();
+            g.drawImage(src, 0, 0, 48, 48, null);
+            g.dispose();
+            java.io.ByteArrayOutputStream baos = new java.io.ByteArrayOutputStream();
+            javax.imageio.ImageIO.write(out, "png", baos);
+            ck.sendMessage("/avatar " + Base64.getEncoder().encodeToString(baos.toByteArray()));
+        } catch(Exception ex) {
+            addMsg("<font color=\"" + Theme.ERR + "\">设置头像失败: " + ex.getMessage() + "</font>");
+        }
+    }
+    // ===== 语音(功能二十三):按住录音(16kHz 16bit 单声道),松开存 WAV 走分块传输 =====
+    private void startRecording() {
+        if(ck == null || !ck.isConnected() || recording) return;
+        try {
+            javax.sound.sampled.AudioFormat fmt = new javax.sound.sampled.AudioFormat(16000, 16, 1, true, false);
+            javax.sound.sampled.DataLine.Info info =
+                new javax.sound.sampled.DataLine.Info(javax.sound.sampled.TargetDataLine.class, fmt);
+            recLine = (javax.sound.sampled.TargetDataLine)javax.sound.sampled.AudioSystem.getLine(info);
+            recLine.open(fmt);
+            recLine.start();
+            recBuf = new java.io.ByteArrayOutputStream();
+            recording = true;
+            recStart = System.currentTimeMillis();
+            buttonVoice.setText("松开发送");
+            new Thread() { public void run() {
+                byte[] buf = new byte[3200];
+                while(recording && System.currentTimeMillis() - recStart < 60000) { // 上限 60 秒
+                    int n = recLine.read(buf, 0, buf.length);
+                    if(n > 0) recBuf.write(buf, 0, n);
+                }
+            }}.start();
+        } catch(Exception ex) {
+            addMsg("<font color=\"" + Theme.ERR + "\">无法录音(没有麦克风?): " + ex.getMessage() + "</font>");
+        }
+    }
+    private void stopRecordingAndSend() {
+        if(!recording) return;
+        recording = false;
+        buttonVoice.setText("按住说话");
+        try {
+            recLine.stop();
+            recLine.close();
+            Thread.sleep(80); // 等采集线程退出
+            byte[] pcm = recBuf.toByteArray();
+            if(System.currentTimeMillis() - recStart < 600 || pcm.length == 0) {
+                addMsg("<font color=\"" + Theme.SELF + "\">录音太短,已取消</font>");
+                return;
+            }
+            javax.sound.sampled.AudioFormat fmt = new javax.sound.sampled.AudioFormat(16000, 16, 1, true, false);
+            javax.sound.sampled.AudioInputStream ais = new javax.sound.sampled.AudioInputStream(
+                new java.io.ByteArrayInputStream(pcm), fmt, pcm.length / fmt.getFrameSize());
+            java.io.File f = new java.io.File(System.getProperty("java.io.tmpdir"),
+                "voice_" + new java.text.SimpleDateFormat("HHmmss").format(new java.util.Date()) + ".wav");
+            javax.sound.sampled.AudioSystem.write(ais, javax.sound.sampled.AudioFileFormat.Type.WAVE, f);
+            sendFileChunked(MAIN_ROOM.equals(currentConv) ? "*" : currentConv, f);
+        } catch(Exception ex) {
+            addMsg("<font color=\"" + Theme.ERR + "\">语音发送失败: " + ex.getMessage() + "</font>");
+        }
+    }
+    // ===== 表情面板(功能二十六):内置表情插短码;自定义表情点击直接作为图片发送 =====
+    private void showEmoteMenu() {
+        JPopupMenu menu = new JPopupMenu();
+        JPanel grid = new JPanel(new GridLayout(0, 4, 4, 4));
+        for(int i = 0; i < Emotes.NAMES.length; i++) {
+            final String name = Emotes.NAMES[i];
+            JButton b = new JButton(new ImageIcon(Emotes.file(name).getAbsolutePath()));
+            b.setToolTipText("/" + name);
+            b.setMargin(new Insets(2,2,2,2));
+            b.addActionListener(new ActionListener() {
+                public void actionPerformed(ActionEvent ev) {
+                    msgWindow.setText(msgWindow.getText() + "/" + name);
+                    msgWindow.requestFocus();
+                    menuHide();
+                }
+            });
+            grid.add(b);
+        }
+        java.io.File[] cs = Emotes.customs();
+        for(int i = 0; i < cs.length; i++) {
+            final java.io.File cf = cs[i];
+            try {
+                Image im = javax.imageio.ImageIO.read(cf);
+                if(im == null) continue;
+                JButton b = new JButton(new ImageIcon(im.getScaledInstance(28, 28, Image.SCALE_SMOOTH)));
+                b.setToolTipText("自定义表情(点击发送)");
+                b.setMargin(new Insets(2,2,2,2));
+                b.addActionListener(new ActionListener() {
+                    public void actionPerformed(ActionEvent ev) {
+                        if(ck != null && ck.isConnected())
+                            sendFileChunked(MAIN_ROOM.equals(currentConv) ? "*" : currentConv, cf);
+                        menuHide();
+                    }
+                });
+                grid.add(b);
+            } catch(Exception e) {}
+        }
+        JButton add = new JButton("＋");
+        add.setToolTipText("添加自定义表情(选一张图片)");
+        add.setMargin(new Insets(2,6,2,6));
+        add.addActionListener(new ActionListener() {
+            public void actionPerformed(ActionEvent ev) {
+                menuHide();
+                JFileChooser fc = new JFileChooser();
+                if(fc.showOpenDialog(ChatClient.this) == JFileChooser.APPROVE_OPTION) {
+                    try { Emotes.addCustom(fc.getSelectedFile()); }
+                    catch(Exception ex) { addMsg("<font color=\"" + Theme.ERR + "\">添加失败</font>"); }
+                }
+            }
+        });
+        grid.add(add);
+        menu.add(grid);
+        emoteMenu = menu;
+        menu.show(buttonEmote, 0, -menu.getPreferredSize().height);
+    }
+    private JPopupMenu emoteMenu;
+    private void menuHide() { if(emoteMenu != null) emoteMenu.setVisible(false); }
     // ===== 本地聊天记录(功能二十一,按身份隔离) =====
     private String b64(String s) {
         try { return java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(s.getBytes("UTF-8")); }
@@ -408,13 +676,19 @@ public class ChatClient extends JFrame implements KeyListener, ActionListener, F
             String[] t = split3(cmd.substring(4));
             if(t == null) return;
             boolean mine = isMe(t[1]);
-            ensureConv(MAIN_ROOM).putMsg("m" + t[0], mine ? ClientHistory.SELF : ClientHistory.OTHER, t[1], t[2]);
+            // @提及(功能二十四):被点名时正文橙色加粗 + 强提醒
+            boolean mention = !mine && myNick.length() > 0
+                && t[2].toLowerCase().indexOf("@" + myNick.toLowerCase()) >= 0;
+            String body2 = mention ? "<b><font color=\"" + Theme.WARN + "\">" + t[2] + "</font></b>" : t[2];
+            ensureConv(MAIN_ROOM).putMsg("m" + t[0], mine ? ClientHistory.SELF : ClientHistory.OTHER, t[1], body2);
             markUnread(MAIN_ROOM);
+            notifyIncoming(t[1], t[2], mention);
         } else if(cmd.startsWith("PM ")) {
             // 私聊: PM <id> <发送者> <正文> → 对方的消息,靠左气泡
             String[] t = split3(cmd.substring(3));
             if(t == null) return;
             ensureConv(t[1]).putMsg("m" + t[0], ClientHistory.OTHER, t[1], t[2]);
+            notifyIncoming(t[1], t[2], false);
             lastRecvId.put(t[1], t[0]);          // 记住最近收到的 id,供已读回执
             if(t[1].equals(currentConv) && ck != null && ck.isConnected())
                 ck.sendMessage("/read " + t[0]); // 正在看这个会话 → 立即回执已读
@@ -442,6 +716,26 @@ public class ChatClient extends JFrame implements KeyListener, ActionListener, F
             receiveFile(cmd.substring(5), MAIN_ROOM);
         } else if(cmd.startsWith("USERINFO ")) {
             showUserInfo(cmd.substring(9));
+        } else if(cmd.startsWith("AVATAR ")) {
+            // 头像分发(功能二十二):缓存到本地 + 刷新列表图标
+            int sp = cmd.indexOf(' ', 7);
+            if(sp < 0) return;
+            String nick = cmd.substring(7, sp);
+            try {
+                byte[] png = Base64.getDecoder().decode(cmd.substring(sp + 1));
+                avatarDir.mkdirs();
+                java.io.File f = new java.io.File(avatarDir, b64(nick.toLowerCase()) + ".png");
+                java.nio.file.Files.write(f.toPath(), png);
+                avatars.put(nick.toLowerCase(), scaledIcon(f));
+                userList.repaint();
+                convList.repaint();
+            } catch(Exception e) {}
+        } else if(cmd.startsWith("SHAKE ")) {
+            // 窗口抖动(功能二十四)
+            String from = cmd.substring(6).trim();
+            appendTo(from, "<font color=\"" + Theme.WARN + "\">" + from + " 向你发送了一个窗口抖动</font>");
+            if(soundToggle.isSelected()) Toolkit.getDefaultToolkit().beep();
+            doShake();
         } else if(cmd.startsWith("NEEDPASS")) {
             promptEntryPass();
         } else if(cmd.startsWith("ROOMMEM ")) {
@@ -475,8 +769,12 @@ public class ChatClient extends JFrame implements KeyListener, ActionListener, F
             String sender = t[2].substring(0, sp), body = t[2].substring(sp + 1);
             String conv = "#" + t[1];
             boolean mine = isMe(sender);
-            ensureConv(conv).putMsg("m" + t[0], mine ? ClientHistory.SELF : ClientHistory.OTHER, sender, body);
+            boolean mention = !mine && myNick.length() > 0
+                && body.toLowerCase().indexOf("@" + myNick.toLowerCase()) >= 0;
+            String body2 = mention ? "<b><font color=\"" + Theme.WARN + "\">" + body + "</font></b>" : body;
+            ensureConv(conv).putMsg("m" + t[0], mine ? ClientHistory.SELF : ClientHistory.OTHER, sender, body2);
             markUnread(conv);
+            notifyIncoming(sender, body, mention);
         } else if(cmd.startsWith("ROOMSYS ")) {
             int sp = cmd.indexOf(' ', 8);
             if(sp < 0) return;
@@ -550,6 +848,9 @@ public class ChatClient extends JFrame implements KeyListener, ActionListener, F
             || lower.endsWith(".mov") || lower.endsWith(".wmv")) {
             return "<font color=\"" + Theme.PRIV + "\">[视频] " + fname
                     + "（<a href=\"" + uri + "\">点击播放</a>）</font>";
+        } else if(lower.endsWith(".wav") || lower.endsWith(".mp3") || lower.endsWith(".m4a")) {
+            return "<font color=\"" + Theme.PRIV + "\">[语音] " + fname
+                    + "（<a href=\"" + uri + "\">点击播放</a>）</font>"; // 功能二十三
         }
         return "<font color=\"" + Theme.PRIV + "\">[文件] " + fname
                 + "（<a href=\"" + uri + "\">打开</a>）</font>";
@@ -746,6 +1047,13 @@ public class ChatClient extends JFrame implements KeyListener, ActionListener, F
             public void actionPerformed(ActionEvent ev) { openConv(name); }
         });
         menu.add(chat);
+        JMenuItem shake = new JMenuItem("发送窗口抖动");
+        shake.addActionListener(new ActionListener() {
+            public void actionPerformed(ActionEvent ev) {
+                if(ck != null && ck.isConnected()) ck.sendMessage("/shake " + name);
+            }
+        });
+        menu.add(shake);
         menu.show(userList, e.getX(), e.getY());
     }
     // 会话列表右键菜单：仅好友条目提供"删除好友"
@@ -999,6 +1307,28 @@ public class ChatClient extends JFrame implements KeyListener, ActionListener, F
         msgWindow.setText("");
     }
     public void keyPressed(KeyEvent e) {
+        // 截图直接粘贴(功能二十五):输入框 Ctrl+V,剪贴板里是图片就直接作为图片消息发出
+        if(e.getSource() == msgWindow && e.isControlDown() && e.getKeyCode() == KeyEvent.VK_V) {
+            try {
+                java.awt.datatransfer.Transferable t =
+                    Toolkit.getDefaultToolkit().getSystemClipboard().getContents(null);
+                if(t != null && t.isDataFlavorSupported(java.awt.datatransfer.DataFlavor.imageFlavor)) {
+                    e.consume(); // 拦下默认粘贴(避免贴出乱码文本)
+                    if(ck == null || !ck.isConnected()) { addMsg("<font color=\"" + Theme.ERR + "\">请先连接服务器</font>"); return; }
+                    Image img = (Image)t.getTransferData(java.awt.datatransfer.DataFlavor.imageFlavor);
+                    java.awt.image.BufferedImage bi = new java.awt.image.BufferedImage(
+                        img.getWidth(null), img.getHeight(null), java.awt.image.BufferedImage.TYPE_INT_RGB);
+                    Graphics2D g = bi.createGraphics();
+                    g.drawImage(img, 0, 0, null);
+                    g.dispose();
+                    java.io.File f = new java.io.File(System.getProperty("java.io.tmpdir"),
+                        "paste_" + System.currentTimeMillis() + ".png");
+                    javax.imageio.ImageIO.write(bi, "png", f);
+                    sendFileChunked(MAIN_ROOM.equals(currentConv) ? "*" : currentConv, f);
+                }
+            } catch(Exception ex) {}
+        }
+        if(e.getKeyCode() == KeyEvent.VK_ESCAPE) setState(JFrame.ICONIFIED); // Esc 最小化(到托盘)
     }
     public void keyReleased(KeyEvent e) {
         if(e.getSource() == msgWindow) {
@@ -1038,6 +1368,8 @@ public class ChatClient extends JFrame implements KeyListener, ActionListener, F
         if(e.getSource()==buttonTheme) { Theme.toggle(); applyTheme(); }
         if(e.getSource()==buttonAddRow) infoModel.addRow(new Object[]{"",""});
         if(e.getSource()==buttonSaveInfo) saveMyInfo();
+        if(e.getSource()==buttonAvatar) chooseAvatar();
+        if(e.getSource()==buttonEmote) showEmoteMenu();
         if(e.getSource()==buttonAddFriend && !MAIN_ROOM.equals(currentConv)
             && ck != null && ck.isConnected())
             ck.sendMessage("/addfriend " + currentConv); // 右栏一键加好友，回执进公共聊天室
@@ -1170,7 +1502,7 @@ public class ChatClient extends JFrame implements KeyListener, ActionListener, F
             return "<table width=\"100%\" cellpadding=\"3\"><tr><td align=\"" + align + "\">"
                  + head + "<br>"
                  + "<table bgcolor=\"" + bub + "\" cellpadding=\"6\" cellspacing=\"0\"><tr><td>"
-                 + "<font color=\"" + Theme.BUBTX + "\">" + m.body + "</font>"
+                 + "<font color=\"" + Theme.BUBTX + "\">" + Emotes.apply(m.body) + "</font>" // 短码→表情图(功能二十六)
                  + "</td></tr></table></td></tr></table>";
         }
         public void renderAll() {
