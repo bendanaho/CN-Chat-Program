@@ -87,7 +87,7 @@ public class ChatClient extends JFrame implements KeyListener, ActionListener, F
         userList.addMouseListener(new MouseAdapter() {
             public void mouseClicked(MouseEvent e) {
                 if(!SwingUtilities.isLeftMouseButton(e)) return; // 右键交给弹出菜单
-                // 点列表空白处取消选中（选中=文件私发对象，取消=群发）
+                // 点列表空白处取消选中（选中现在只是视觉焦点，不再影响文件发送目标）
                 int idx = userList.locationToIndex(e.getPoint());
                 if(idx >= 0 && !userList.getCellBounds(idx, idx).contains(e.getPoint())) {
                     userList.clearSelection();
@@ -475,18 +475,10 @@ public class ChatClient extends JFrame implements KeyListener, ActionListener, F
             addMsg("<font color=\"#ff0000\">尚未连接服务器，请先点击 Connect</font>");
             return;
         }
-        // 私聊会话里发文件=发给会话对方；公共聊天室里按右侧选中（无选中=群发）
-        String target;
-        if(!MAIN_ROOM.equals(currentConv)) {
-            target = currentConv;
-        } else {
-            Object sel = userList.getSelectedValue();
-            target = (sel == null) ? "*" : sel.toString();
-        }
-        if(target.equalsIgnoreCase(txtNick.getText())) {
-            addMsg("不能给自己发文件，请选择其他用户，或取消选择进行群发");
-            return;
-        }
+        // 发送目标只由"当前在哪个会话"决定：公共聊天室=群发，私聊会话=发给会话对方。
+        // 不再参考右侧列表的选中状态——选中是不易察觉的隐藏状态，
+        // 曾导致在公共聊天室发文件被悄悄私发给之前点过的人
+        String target = MAIN_ROOM.equals(currentConv) ? "*" : currentConv;
         JFileChooser fc = new JFileChooser();
         if(fc.showOpenDialog(this) != JFileChooser.APPROVE_OPTION) return;
         java.io.File f = fc.getSelectedFile();
