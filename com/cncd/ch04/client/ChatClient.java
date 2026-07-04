@@ -39,6 +39,7 @@ public class ChatClient extends JFrame implements KeyListener, ActionListener, F
     volatile boolean reconnecting = false; // 自动重连中(功能十一)
     Vector pendingOut = new Vector();  // 断线期间的待发消息,重连后补发
     String lastPassword;               // 缓存最近一次 /register 或 /verify 的密码,重连自动验证身份用
+    String myNick = "";                // 服务器确认的"我的昵称",判断消息归属用(比可编辑的 txtNick 可靠)
     HashMap recvs = new HashMap();     // 分块接收中的文件:tid -> FileRecv(功能十二)
     private static int tidCounter = 0;
     private String rawInfoHtml = "";   // 右栏信息的原始(带颜色占位符)HTML,切主题时重渲染
@@ -400,7 +401,7 @@ public class ChatClient extends JFrame implements KeyListener, ActionListener, F
             // 带唯一 ID 的群聊消息: MSG <id> <昵称> <正文>。自己发的靠右气泡,别人的靠左
             String[] t = split3(cmd.substring(4));
             if(t == null) return;
-            boolean mine = t[1].equalsIgnoreCase(txtNick.getText().trim());
+            boolean mine = isMe(t[1]);
             ensureConv(MAIN_ROOM).putMsg("m" + t[0], mine ? ClientHistory.SELF : ClientHistory.OTHER, t[1], t[2]);
             markUnread(MAIN_ROOM);
         } else if(cmd.startsWith("PM ")) {
@@ -467,7 +468,7 @@ public class ChatClient extends JFrame implements KeyListener, ActionListener, F
             if(sp < 0) return;
             String sender = t[2].substring(0, sp), body = t[2].substring(sp + 1);
             String conv = "#" + t[1];
-            boolean mine = sender.equalsIgnoreCase(txtNick.getText().trim());
+            boolean mine = isMe(sender);
             ensureConv(conv).putMsg("m" + t[0], mine ? ClientHistory.SELF : ClientHistory.OTHER, sender, body);
             markUnread(conv);
         } else if(cmd.startsWith("ROOMSYS ")) {
@@ -711,6 +712,11 @@ public class ChatClient extends JFrame implements KeyListener, ActionListener, F
             if(s.equalsIgnoreCase((String)v.get(i))) return true;
         return false;
     }
+    // 是否是我发的消息:优先用服务器确认的 myNick,退化到昵称框(兼容极早期未确认的一瞬)
+    private boolean isMe(String nick) {
+        if(myNick.length() > 0 && nick.equalsIgnoreCase(myNick)) return true;
+        return nick.equalsIgnoreCase(txtNick.getText().trim());
+    }
     // 在线用户列表右键菜单：添加好友（已是好友则只有"发起私聊"；自己不弹）
     private void userMenu(MouseEvent e) {
         if(!e.isPopupTrigger()) return;
@@ -854,9 +860,11 @@ public class ChatClient extends JFrame implements KeyListener, ActionListener, F
         String marker = "ou are now known as "; // 兼容 "You are..." 和 "...you are..." 两种回执
         int i = str.indexOf(marker);
         if(str.startsWith("Server:") && i > 0) {
-            txtNick.setText(str.substring(i + marker.length()).trim());
+            String nk = str.substring(i + marker.length()).trim();
+            txtNick.setText(nk);
+            myNick = nk; // 服务器确认的权威昵称,用于消息归属判断
             // 昵称确立即拉取自己的信息回填顶部编辑区
-            if(ck != null && ck.isConnected()) ck.sendMessage("/infoq " + txtNick.getText().trim());
+            if(ck != null && ck.isConnected()) ck.sendMessage("/infoq " + nk);
         }
     }
     // ===== 个人资料表格(个人信息功能的界面化) =====
@@ -901,6 +909,8 @@ public class ChatClient extends JFrame implements KeyListener, ActionListener, F
             boolean nickSet = !txtNick.getText().equals(ChatClient.nickText)
                               && txtNick.getText().trim().length() > 0;
             if(nickSet) ck.setNick(txtNick.getText());
+            // 记录我的昵称:填了就是它,没填则是服务器默认的端口号昵称
+            myNick = nickSet ? txtNick.getText().trim() : "" + ck.getLocalPort();
             if(ck.isConnected()) {
                 ck.addClient(this);
                 addMsg("<font color=\"" + Theme.OK + "\">connected! Local Port:" + ck.getLocalPort() + "</font>");
@@ -928,7 +938,9 @@ public class ChatClient extends JFrame implements KeyListener, ActionListener, F
                         appendTo(MAIN_ROOM, "<font color=\"" + Theme.OK + "\">已自动重连! Local Port:"
                                 + ck.getLocalPort() + "</font>");
                         String n = txtNick.getText().trim();
-                        if(n.length() > 0 && !n.equals(ChatClient.nickText)) ck.setNick(n); // 取回原昵称
+                        boolean has = n.length() > 0 && !n.equals(ChatClient.nickText);
+                        if(has) ck.setNick(n); // 取回原昵称
+                        myNick = has ? n : "" + ck.getLocalPort();
                         try { Thread.sleep(400); } catch(Exception e) {}
                         flushPending();
                         reconnecting = false;
