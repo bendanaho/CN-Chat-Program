@@ -113,7 +113,6 @@ public class ChatClient extends JFrame implements KeyListener, ActionListener, F
         buttonSend.addActionListener(this);
         buttonFile.addActionListener(this);
         msgWindow.addKeyListener(this);
-        add(southPanel, BorderLayout.SOUTH);
         //创建Center：CardLayout，每个会话一个独立聊天窗格
         centerLayout = new CardLayout();
         centerCards = new JPanel(centerLayout);
@@ -122,7 +121,11 @@ public class ChatClient extends JFrame implements KeyListener, ActionListener, F
         sc = new JScrollPane(historyWindow);
         sc.setAutoscrolls(true);
         centerCards.add(sc, MAIN_ROOM);
-        this.add(centerCards, BorderLayout.CENTER);
+        // 输入栏放进聊天区容器的底部,左右边界与聊天详情对齐(不再横跨整个窗口底部)
+        JPanel centerWrap = new JPanel(new BorderLayout());
+        centerWrap.add(centerCards, BorderLayout.CENTER);
+        centerWrap.add(southPanel, BorderLayout.SOUTH);
+        this.add(centerWrap, BorderLayout.CENTER);
         //创建East：在线用户列表（服务器推送，实时刷新）
         userModel = new DefaultListModel();
         userList = new JList(userModel);
@@ -191,7 +194,9 @@ public class ChatClient extends JFrame implements KeyListener, ActionListener, F
             BorderFactory.createLineBorder(Theme.panelColor().darker()), t);
     }
     private void setThemeButtonText() {
-        buttonTheme.setText("<html><center>" + (Theme.isDark() ? "☀<br>日间" : "☾<br>夜间") + "</center></html>");
+        // 图标放大到 30pt、文字放大到 16pt
+        buttonTheme.setText("<html><center><font size=\"7\">" + (Theme.isDark() ? "☀" : "☾")
+                + "</font><br><font size=\"5\">" + (Theme.isDark() ? "日间" : "夜间") + "</font></center></html>");
         buttonTheme.setToolTipText("切换日间/夜间模式");
     }
     // ===== 主题(功能十四):遍历组件树刷色 + 各会话窗格整体重渲染 =====
@@ -201,9 +206,9 @@ public class ChatClient extends JFrame implements KeyListener, ActionListener, F
         while(it.hasNext()) ((ClientHistory)(it.next())).renderAll();
         infoPane.setText(Theme.apply(rawInfoHtml));
         infoPane.setBackground(Theme.bgColor());
-        // 主题按钮用主题强调色,显眼
-        buttonTheme.setBackground(Theme.accentColor());
-        buttonTheme.setForeground(Color.white);
+        // 主题按钮:普通面板背景色(去掉绿色底),靠大图标+大字醒目
+        buttonTheme.setBackground(Theme.panelColor());
+        buttonTheme.setForeground(Theme.fgColor());
         setThemeButtonText();
         if(infoTable != null) {
             infoTable.setBackground(Theme.bgColor());

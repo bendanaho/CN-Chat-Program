@@ -29,7 +29,7 @@ public class Theme {
     public static Color panelColor()   { return dark ? Color.decode("#2b2d31") : Color.decode("#f0f2f5"); }
     public static String chatBg()      { return dark ? "#232428" : "#ededed"; } // 微信式浅灰聊天背景
     public static Color chatBgColor()  { return Color.decode(chatBg()); }
-    public static Color accentColor()  { return dark ? Color.decode("#3e5a4a") : Color.decode("#07c160"); } // 微信绿
+    public static Color accentColor()  { return dark ? Color.decode("#3e5a4a") : Color.decode("#07c160"); } // 微信绿(气泡用)
     /** 把 HTML 中的颜色占位符替换为当前主题的实际色值 */
     public static String apply(String html) {
         return html.replace(PRIV, dark ? "#c39bd3" : "#9933cc")
