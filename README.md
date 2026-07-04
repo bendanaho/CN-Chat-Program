@@ -36,6 +36,13 @@ java -cp out com.cncd.ch04.client.ChatClient
 
 客户端连接后常用命令:`/nick 名字`、`/users`、`/msg 名字 内容`、`/register 名字 密码`、`/setinfo 字段 内容`、`/getinfo [用户]`、`/addfriend 名字`、`/friends`;发文件/图片用界面上的"文件"按钮(右侧列表选中=私发,不选=群发)。
 
+## 局域网多机部署
+
+1. 运行 `build-jar.bat` 生成 `chat-server.jar` 与 `chat-client.jar`(目标机只需 JRE);
+2. 服务器机器双击 `chat-server.jar`(或 `java -jar chat-server.jar 3500`),首次运行在防火墙弹窗点"允许",窗口会打印本机全部局域网 IP;
+3. 其他机器拷贝 `chat-client.jar` 双击运行,点 **"扫描局域网"**(UDP 广播自动发现服务器并填入地址),再点 Connect 即可;
+4. 全部消息默认 **AES 加密**传输;两端都加 `-Dchat.plain=true` 启动可切回明文(抓包对比演示用)。
+
 ## 协议约定
 
 单 TCP 连接,消息以字节 `0xFF` 结尾;`0xFD` 开头表示客户端命令;`0x01` 开头表示服务器推送(在线名单 `USERLIST`、文件 `FILE`);正文统一 UTF-8 编码(三个控制字节均不会出现在合法 UTF-8 序列中,天然无冲突)。

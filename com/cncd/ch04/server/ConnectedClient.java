@@ -15,6 +15,7 @@ public class ConnectedClient {
     private ServerMsgListener msgList;
     private Socket sock;
     public boolean printMsg = false;
+    public volatile long lastHeard = System.currentTimeMillis(); // 最近一次收到该客户端消息的时刻(心跳清扫用)
     public ConnectedClient(Socket sock, ConnectionKeeper ck) {
         this.ck = ck;
         ipNumber = sock.getInetAddress().getHostAddress();
@@ -87,9 +88,8 @@ class ServerMsgSender extends Thread {
             while(running) {
                 while(msgList.size()>0) {
                     String toSend = (String)(msgList.removeFirst());
-                    // 中文修复：writeBytes 只写每个 char 的低 8 位，会截断汉字；
-                    // 改成先按 UTF-8 编码正文，再单独写 1 字节结束符 0xFF。
-                    dataOut.write(toSend.getBytes("UTF-8"));
+                    // UTF-8 编码 → 加密层包裹(AES+Base64,关闭时原样) → 0xFF 分帧
+                    dataOut.write(com.cncd.ch04.common.CryptoUtil.wrap(toSend.getBytes("UTF-8")));
                     dataOut.write(MainServer.MSGENDCHAR);
                     if(cc.printMsg) System.out.println("MsgSender.run: Sending: " + toSend);
                     sleep(10);
@@ -130,23 +130,24 @@ class ServerMsgListener extends Thread {
             BufferedInputStream buffIn = new BufferedInputStream(sock.getInputStream());
             DataInputStream dataIn = new DataInputStream(buffIn);
             while(running) {
-                // 中文修复：先把一条消息的原始字节收进缓冲区，遇到结束符 0xFF 或断开(-1)才停止，
-                // 再整体 UTF-8 解码。命令消息以控制字节 0xFD 开头，这里单独识别，不把它放进
-                // UTF-8 正文（0xFD 不是合法 UTF-8 字节，混进去会破坏解码）。
+                // 把一帧的全部字节收进缓冲区(0xFF 分帧/-1 断开),先过解密层还原明文字节,
+                // 再看首字节是否 0xFD 命令标记,其余按 UTF-8 解码。
+                // (加密后 0xFD 在密文内部,必须先整帧解密再判别——这是接入加密层时的关键顺序)
                 java.io.ByteArrayOutputStream baos = new java.io.ByteArrayOutputStream();
                 boolean didRun = false;
-                boolean isCommand = false;
                 int c;
                 sleep(10);
-                c = dataIn.read();
-                if(c == 0xFD) { isCommand = true; didRun = true; c = dataIn.read(); }
-                while(c != 0xff && c != -1) {
+                while( (c = dataIn.read()) != 0xff && c != -1) {
                     baos.write(c);
                     didRun = true;
-                    c = dataIn.read();
                 }
                 if(c == -1) { cc.dropClient(); return; } // 对端断开，干净退出（原代码会死循环）
-                String body = new String(baos.toByteArray(), "UTF-8");
+                if(!didRun) continue;
+                byte[] raw = com.cncd.ch04.common.CryptoUtil.unwrap(baos.toByteArray());
+                boolean isCommand = raw.length > 0 && (raw[0] & 0xFF) == 0xFD;
+                String body = isCommand ? new String(raw, 1, raw.length - 1, "UTF-8")
+                                        : new String(raw, "UTF-8");
+                cc.lastHeard = System.currentTimeMillis(); // 收到任何消息都算"活着"
                 if(cc.verifyedCount>0 && !cc.verifyedBoolean && !isCommand) {
                     cc.verifyedCount--;
                     if(cc.verifyedCount==1) {
@@ -158,15 +159,17 @@ class ServerMsgListener extends Thread {
                         cc.sendMessage("type: \"/verify &lt;password&gt\" to verify your nick");
                     }
                 }
-                if(didRun) {
-                    if(!isCommand) {
-                        String toSend = "" + cc.nick + ":" + body;
-                        if(cc.printMsg) System.out.println("MsgListenet.run Sending msg: " + toSend);
-                        cc.broadcastMessage(toSend);
-                    } else {
-                        // 还原成 "0xFD + 正文" 交给 runCommand，保持它 charAt(0)==0xFD 再 substring(1) 的老约定不变
-                        cc.runCommand("" + (char)0xFD + body);
-                    }
+                if(!isCommand) {
+                    if(body.trim().length() == 0) continue; // 空消息不广播
+                    // 群聊消息升级为带唯一 ID 的推送(功能十二):0x01 MSG <id> <昵称> <正文>
+                    // ID 让每条消息可寻址,是已读回执/消息撤回(阶段二)的前置
+                    String toSend = "" + MainServer.PUSHMARKER + "MSG "
+                                    + MainServer.nextMsgId() + " " + cc.nick + " " + body;
+                    if(cc.printMsg) System.out.println("MsgListenet.run Sending msg: " + toSend);
+                    cc.broadcastMessage(toSend);
+                } else {
+                    // 还原成 "0xFD + 正文" 交给 runCommand，保持它 charAt(0)==0xFD 再 substring(1) 的老约定不变
+                    cc.runCommand("" + (char)0xFD + body);
                 }
             }
         } catch(SocketException se) {

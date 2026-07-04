@@ -29,7 +29,40 @@ public class ClientKernel {
         if(isConnected) {
             cms = new ClientMsgSender(this, sock);
             cml = new ClientMsgListener(this, sock);
+            new Heartbeat().start(); // 心跳保活(功能十一)
         }
+    }
+    // ===== 心跳(功能十一):定时发 /hb,服务器原样回显;既证明自己活着,也检测服务器死没死 =====
+    private volatile long lastHbReply = System.currentTimeMillis();
+    private int hbSeq = 0;
+    public volatile long lastRtt = -1; // 最近一次心跳往返时延(阶段二网络面板的数据源)
+    class Heartbeat extends Thread {
+        public Heartbeat() { setDaemon(true); }
+        public void run() {
+            while(!dropMe && isConnected) {
+                pause(5000);
+                if(dropMe || !isConnected) break;
+                sendMessage("/hb " + (++hbSeq) + " " + System.currentTimeMillis());
+                // 15 秒收不到任何心跳应答 → 服务器已死(TCP 自身对拔网线类故障要很久才报错)
+                if(System.currentTimeMillis() - lastHbReply > 15000) {
+                    connectionLost();
+                    break;
+                }
+            }
+        }
+    }
+    // 收到心跳应答(接收线程拦截后回调):刷新活性时刻,顺便算 RTT
+    void onHb(String s) { // 格式: 0x01 + "HB <seq> <发送时刻>"
+        lastHbReply = System.currentTimeMillis();
+        try {
+            StringTokenizer st = new StringTokenizer(s.substring(4));
+            st.nextToken(); // seq
+            lastRtt = System.currentTimeMillis() - Long.parseLong(st.nextToken());
+        } catch(Exception e) {}
+    }
+    // 发送队列积压量:分块传输据此让聊天消息插进块间隙(交织发送)
+    public int pendingCount() {
+        return (cms == null) ? 0 : cms.size();
     }
     public void connect() {
         try {
@@ -99,7 +132,7 @@ public class ClientKernel {
         if(!isConnected) return;
         isConnected = false;
         storeMsg("" + PUSHMARKER + "USERLIST"); // 空名单 → 界面清空在线用户列表
-        storeMsg("<font color=\"#ff0000\">与服务器的连接已断开，请重新 Connect</font>");
+        storeMsg("" + PUSHMARKER + "LOST");     // 通知界面:断线了(界面负责提示 + 发起自动重连)
     }
     public static void main(String args[]) {
         new ClientKernel("localhost", 1984);
@@ -120,6 +153,9 @@ class ClientMsgSender extends Thread {
     public synchronized void addMessage(String msg) {
         msgList.addLast(msg);
     }
+    public synchronized int size() {
+        return msgList.size();
+    }
     public void drop() {
         running = false;
     }
@@ -132,15 +168,18 @@ class ClientMsgSender extends Thread {
             while(running) {
                 while(msgList.size()>0) {
                     String msg = ((String)(msgList.removeFirst()));
-                    // 中文修复：不再逐字符写低8位（会把汉字截断），而是整条消息按 UTF-8 编码成字节发送。
-                    // 命令消息以控制字节 0xFD(COMMAND) 开头，该标记单独作为原始字节写出，
-                    // 其余正文才做 UTF-8 编码，避免把 0xFD 也编码成两字节而认不出来。
+                    // 组装明文字节:0xFD 命令标记(如有)+ UTF-8 正文;整段过加密层后 0xFF 分帧。
+                    // 加密后标记在密文内部,由服务器解密后再判别
+                    byte[] plain;
                     if(msg.length()>0 && msg.charAt(0) == ClientKernel.COMMAND) {
-                        dataOut.write(ClientKernel.COMMAND);
-                        dataOut.write(msg.substring(1).getBytes("UTF-8"));
+                        byte[] b = msg.substring(1).getBytes("UTF-8");
+                        plain = new byte[b.length + 1];
+                        plain[0] = (byte)0xFD;
+                        System.arraycopy(b, 0, plain, 1, b.length);
                     } else {
-                        dataOut.write(msg.getBytes("UTF-8"));
+                        plain = msg.getBytes("UTF-8");
                     }
+                    dataOut.write(com.cncd.ch04.common.CryptoUtil.wrap(plain));
                     dataOut.write(ClientKernel.MSGENDCHAR);
                 }
                 sleep(10);
@@ -175,16 +214,20 @@ class ClientMsgListener extends Thread{
                 BufferedInputStream buffIn = new BufferedInputStream(s.getInputStream());
                 DataInputStream dataIn = new DataInputStream(buffIn);
                 while(running) {
-                    // 中文修复 + 健壮性：把一条消息的字节先收进缓冲区，遇到结束符 0xFF 或
-                    // 连接断开(-1)才停止，然后整体按 UTF-8 解码；避免逐字节转 char 造成乱码，
-                    // 同时修掉原代码 read() 返回 -1 后无限 append 的死循环。
+                    // 整帧收字节(0xFF 分帧/-1 断开) → 解密层还原 → UTF-8 解码。
+                    // 心跳应答(0x01 HB ...)在这里拦截交给内核,不进聊天消息流
                     java.io.ByteArrayOutputStream baos = new java.io.ByteArrayOutputStream();
                     int c;
                     while( (c=dataIn.read()) != ClientKernel.MSGENDCHAR && c != -1) {
                         baos.write(c);
                     }
                     if(c == -1) break;
-                    ck.storeMsg(new String(baos.toByteArray(), "UTF-8"));
+                    if(baos.size() == 0) continue;
+                    String s = new String(com.cncd.ch04.common.CryptoUtil.unwrap(baos.toByteArray()), "UTF-8");
+                    if(s.length() > 3 && s.charAt(0) == ClientKernel.PUSHMARKER && s.startsWith("HB ", 1))
+                        ck.onHb(s);
+                    else
+                        ck.storeMsg(s);
                 }
                 dataIn.close();
                 buffIn.close();

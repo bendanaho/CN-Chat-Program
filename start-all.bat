@@ -5,7 +5,7 @@ cd /d "%~dp0"
 
 echo [1/3] Compiling...
 if not exist classes mkdir classes
-"%JDK%\javac.exe" -encoding UTF-8 -d classes com\cncd\ch04\server\*.java com\cncd\ch04\client\*.java
+"%JDK%\javac.exe" -encoding UTF-8 -d classes com\cncd\ch04\common\*.java com\cncd\ch04\server\*.java com\cncd\ch04\client\*.java
 if not %errorlevel%==0 goto compilefail
 
 echo [2/3] Checking server...

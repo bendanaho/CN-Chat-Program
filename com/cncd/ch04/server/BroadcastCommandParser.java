@@ -18,6 +18,12 @@ public class BroadcastCommandParser implements CommandParser {
     private final String FRIENDS = "friends";
     private final String FILE = "file";
     private final String INFOQ = "infoq"; // 静默查询个人信息：只回机器可读推送，供界面侧栏自动拉取
+    private final String HB = "hb";           // 心跳(功能十一):原样回显 seq 和时间戳,客户端据此测活/测RTT
+    private final String FSTART = "fstart";   // 分块传输(功能十二)三连:开始/数据块/结束
+    private final String FCHUNK = "fchunk";
+    private final String FEND = "fend";
+    // 进行中的分块传输:tid -> {目标("*"或昵称), 发送者连接}。服务器只做路由中继,不落地文件
+    private final HashMap transfers = new HashMap();
     private final String FRIEND_FIELD = "friends"; // 好友名单在 DataSource 中的保留字段名
         private final String tab = "&nbsp;&nbsp;&nbsp;";
     private DataSource ds;
@@ -69,6 +75,14 @@ public class BroadcastCommandParser implements CommandParser {
                     fileTransfer(cc, strTok);
                 else if(command.equalsIgnoreCase(INFOQ))
                     pushUserInfo(cc, strTok.hasMoreTokens() ? strTok.nextToken() : cc.nick);
+                else if(command.equalsIgnoreCase(HB))
+                    heartbeat(cc, strTok);
+                else if(command.equalsIgnoreCase(FSTART))
+                    fstart(cc, strTok);
+                else if(command.equalsIgnoreCase(FCHUNK))
+                    fchunk(cc, strTok);
+                else if(command.equalsIgnoreCase(FEND))
+                    fend(cc, strTok);
             }
         } catch(Exception e) {
             System.out.println("CommandParser: " + e.getMessage());
@@ -120,12 +134,60 @@ public class BroadcastCommandParser implements CommandParser {
             cc.sendMessage("不能私聊自己");
             return;
         }
-        // 私聊改为机器可读推送：接收方 0x01 PM 发送者 正文，发送方回显 0x01 PMSENT 目标 正文，
-        // 客户端据此把消息路由进对应的会话窗格（会话式界面）。
+        // 私聊为机器可读推送(带消息唯一 ID)：接收方 0x01 PM <id> 发送者 正文，
+        // 发送方回显 0x01 PMSENT <id> 目标 正文，客户端据此路由进对应会话窗格。
         // 发送者仅在对方存在时收到回显（sendTo 找不到人时已发 "Unable to find user"）
-        boolean found = cc.sendTo(user, "" + MainServer.PUSHMARKER + "PM " + cc.nick + " " + body);
+        long id = MainServer.nextMsgId();
+        boolean found = cc.sendTo(user, "" + MainServer.PUSHMARKER + "PM " + id + " " + cc.nick + " " + body);
         if(found)
-            cc.sendMessage("" + MainServer.PUSHMARKER + "PMSENT " + user + " " + body);
+            cc.sendMessage("" + MainServer.PUSHMARKER + "PMSENT " + id + " " + user + " " + body);
+    }
+    // 心跳应答(功能十一):把客户端发来的 seq/时间戳原样推回,一包两用——测活 + 测 RTT
+    private void heartbeat(ConnectedClient cc, StringTokenizer strTok) {
+        StringBuffer sb = new StringBuffer();
+        sb.append(MainServer.PUSHMARKER).append("HB");
+        while(strTok.hasMoreTokens()) sb.append(' ').append(strTok.nextToken());
+        cc.sendMessage(sb.toString());
+    }
+    // ===== 分块传输中继(功能十二):服务器不落地文件,只按 tid 查路由逐块转发 =====
+    private void fstart(ConnectedClient cc, StringTokenizer st) {
+        String target = st.nextToken(), tid = st.nextToken(), fname = st.nextToken();
+        String size = st.nextToken(), count = st.nextToken();
+        if(target.equalsIgnoreCase(cc.nick)) { cc.sendMessage("不能给自己发文件"); return; }
+        String head = "" + MainServer.PUSHMARKER + "FSTART " + cc.nick + " ";
+        String tail = tid + " " + fname + " " + size + " " + count;
+        if(target.equals("*")) {
+            pushToOthers(cc, head + "B " + tail);
+            synchronized(transfers) { transfers.put(tid, target); }
+        } else if(cc.sendTo(target, head + "P " + tail)) {
+            synchronized(transfers) { transfers.put(tid, target); }
+        }
+    }
+    private void fchunk(ConnectedClient cc, StringTokenizer st) {
+        String tid = st.nextToken(), idx = st.nextToken(), b64 = st.nextToken();
+        routeChunk(cc, tid, "" + MainServer.PUSHMARKER + "FCHUNK " + tid + " " + idx + " " + b64, false);
+    }
+    private void fend(ConnectedClient cc, StringTokenizer st) {
+        String tid = st.nextToken();
+        routeChunk(cc, tid, "" + MainServer.PUSHMARKER + "FEND " + tid, true);
+    }
+    private void routeChunk(ConnectedClient cc, String tid, String push, boolean end) {
+        String target;
+        synchronized(transfers) {
+            target = (String)transfers.get(tid);
+            if(end) transfers.remove(tid);
+        }
+        if(target == null) return; // 未知 tid(可能 fstart 失败),静默丢弃
+        if("*".equals(target)) pushToOthers(cc, push);
+        else cc.sendTo(target, push); // 目标中途下线时 sendTo 会提示发送者
+    }
+    private void pushToOthers(ConnectedClient cc, String msg) {
+        LinkedList users = cc.getConnectionKeeper().users(); // 快照
+        Iterator it = users.iterator();
+        while(it.hasNext()) {
+            ConnectedClient u = (ConnectedClient)(it.next());
+            if(u != cc) u.sendMessage(msg);
+        }
     }
     private  void users(ConnectedClient cc) {
         LinkedList users = (LinkedList)((cc.getConnectionKeeper().users()).clone());

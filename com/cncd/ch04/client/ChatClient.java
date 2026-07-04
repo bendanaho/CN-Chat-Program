@@ -30,6 +30,13 @@ public class ChatClient extends JFrame implements KeyListener, ActionListener, F
     Vector tempConvs = new Vector();   // 陌生人临时会话
     HashSet unread = new HashSet();    // 有未读消息的会话
     String currentConv = MAIN_ROOM;
+    JButton buttonScan, buttonTheme;   // 扫描局域网(功能十)、日夜主题切换(功能十四)
+    volatile boolean reconnecting = false; // 自动重连中(功能十一)
+    Vector pendingOut = new Vector();  // 断线期间的待发消息,重连后补发
+    String lastPassword;               // 缓存最近一次 /register 或 /verify 的密码,重连自动验证身份用
+    HashMap recvs = new HashMap();     // 分块接收中的文件:tid -> FileRecv(功能十二)
+    private static int tidCounter = 0;
+    private String rawInfoHtml = "";   // 右栏信息的原始(带颜色占位符)HTML,切主题时重渲染
     ClientKernel ck;
     ClientHistory historyWindow;
     private String lastMsg = "";
@@ -49,11 +56,13 @@ public class ChatClient extends JFrame implements KeyListener, ActionListener, F
         northPanel.add(txtPort = new JTextField(ChatClient.portText));
         northPanel.add(new JLabel("Nick:"));
         northPanel.add(txtNick = new JTextField(ChatClient.nickText));
-        northPanel.add(new JLabel(""));
-        northPanel.add(new JLabel(""));
+        northPanel.add(buttonScan = new JButton("扫描局域网"));
+        northPanel.add(buttonTheme = new JButton(Theme.isDark() ? "日间模式" : "夜间模式"));
         northPanel.add(new JLabel(""));
         northPanel.add(buttonConnect = new JButton("Connect"));
         buttonConnect.addActionListener(this);
+        buttonScan.addActionListener(this);
+        buttonTheme.addActionListener(this);
         txtHost.addKeyListener(this);
         txtHost.addFocusListener(this);
         txtNick.addFocusListener(this);
@@ -140,6 +149,61 @@ public class ChatClient extends JFrame implements KeyListener, ActionListener, F
         convScroll.setPreferredSize(new Dimension(150, 0));
         this.add(convScroll, BorderLayout.WEST);
         rebuildConvList();
+        applyTheme(); // 启动即按用户上次选择的主题渲染
+    }
+    // ===== 主题(功能十四):遍历组件树刷色 + 各会话窗格整体重渲染 =====
+    private void applyTheme() {
+        themeWalk(getContentPane());
+        Iterator it = convs.values().iterator();
+        while(it.hasNext()) ((ClientHistory)(it.next())).renderAll();
+        infoPane.setText(Theme.apply(rawInfoHtml));
+        infoPane.setBackground(Theme.bgColor());
+        buttonTheme.setText(Theme.isDark() ? "日间模式" : "夜间模式");
+        repaint();
+    }
+    private void themeWalk(Component c) {
+        if(c instanceof JPanel || c instanceof JScrollPane || c instanceof JViewport)
+            c.setBackground(Theme.panelColor());
+        if(c instanceof JList || c instanceof JTextField || c instanceof JEditorPane) {
+            c.setBackground(Theme.bgColor());
+            c.setForeground(Theme.fgColor());
+        }
+        if(c instanceof JLabel) c.setForeground(Theme.fgColor());
+        if(c instanceof Container) {
+            Component[] cs = ((Container)c).getComponents();
+            for(int i=0;i<cs.length;i++) themeWalk(cs[i]);
+        }
+    }
+    // ===== 局域网扫描(功能十):UDP 广播探测,服务器应答即自动填入 Host/Port =====
+    private void scanLan() {
+        addMsg("正在扫描局域网内的聊天服务器...");
+        new Thread() { public void run() {
+            try {
+                java.net.DatagramSocket ds = new java.net.DatagramSocket();
+                ds.setBroadcast(true);
+                ds.setSoTimeout(2500);
+                byte[] q = "CHAT_DISCOVER".getBytes("UTF-8");
+                ds.send(new java.net.DatagramPacket(q, q.length,
+                        java.net.InetAddress.getByName("255.255.255.255"), 3600));
+                byte[] buf = new byte[128];
+                java.net.DatagramPacket rp = new java.net.DatagramPacket(buf, buf.length);
+                ds.receive(rp); // 等第一个应答
+                String resp = new String(rp.getData(), 0, rp.getLength(), "UTF-8").trim();
+                ds.close();
+                if(resp.startsWith("CHAT_SERVER ")) {
+                    String ip = rp.getAddress().getHostAddress();
+                    String port = resp.substring(12).trim();
+                    txtHost.setText(ip);
+                    txtPort.setText(port);
+                    addMsg("<font color=\"" + Theme.OK + "\">发现服务器 " + ip + ":" + port
+                            + ",已自动填入,点 Connect 连接</font>");
+                }
+            } catch(java.net.SocketTimeoutException te) {
+                addMsg("<font color=\"" + Theme.ERR + "\">未发现服务器(请确认服务器已启动且在同一局域网)</font>");
+            } catch(Exception ex) {
+                addMsg("<font color=\"" + Theme.ERR + "\">扫描失败: " + ex.getMessage() + "</font>");
+            }
+        }}.start();
     }
    public static void main(String args[]) {
         ChatClient client = new ChatClient();
@@ -159,6 +223,12 @@ public class ChatClient extends JFrame implements KeyListener, ActionListener, F
         }
         appendTo(MAIN_ROOM, str); // 普通广播与系统提示都属于公共聊天室
         syncNick(str);
+        // 自动重连取回注册昵称:服务器要求验证且缓存过密码 → 自动 /verify(功能十一)
+        if(str.indexOf("is registered so you have to verify") >= 0
+            && lastPassword != null && ck != null && ck.isConnected()) {
+            ck.sendMessage("/verify " + lastPassword);
+            appendTo(MAIN_ROOM, "<font color=\"" + Theme.SELF + "\">已用缓存的密码自动验证身份...</font>");
+        }
     }
     // 处理服务器主动推送：USERLIST 在线名单 / FRIENDS 好友名单 / PM,PMSENT 私聊 /
     // FILE 群发文件 / FILEP 私发文件 / USERINFO 个人信息
@@ -190,28 +260,70 @@ public class ChatClient extends JFrame implements KeyListener, ActionListener, F
             if(!MAIN_ROOM.equals(currentConv))
                 buttonAddFriend.setVisible(!containsIgnoreCase(friends, currentConv));
             rebuildConvList();
+        } else if(cmd.startsWith("MSG ")) {
+            // 带唯一 ID 的群聊消息: MSG <id> <昵称> <正文>。ID 作行键存储,为撤回/回执(阶段二)留口
+            String[] t = split3(cmd.substring(4));
+            if(t == null) return;
+            ensureConv(MAIN_ROOM).addOrUpdate("m" + t[0], "<b>" + t[1] + "</b>: " + t[2]);
+            markUnread(MAIN_ROOM);
+            syncNick(t[1] + ":" + t[2]);
         } else if(cmd.startsWith("PM ")) {
-            String rest = cmd.substring(3);
-            int p = rest.indexOf(' ');
-            if(p < 0) return;
-            // 对方发来的私聊 → 路由进与发送者的会话窗格
-            appendTo(rest.substring(0, p), rest.substring(0, p) + ": " + rest.substring(p + 1));
+            // 私聊: PM <id> <发送者> <正文> → 路由进与发送者的会话窗格
+            String[] t = split3(cmd.substring(3));
+            if(t == null) return;
+            ensureConv(t[1]).addOrUpdate("m" + t[0], "<b>" + t[1] + "</b>: " + t[2]);
+            markUnread(t[1]);
         } else if(cmd.startsWith("PMSENT ")) {
-            String rest = cmd.substring(7);
-            int p = rest.indexOf(' ');
-            if(p < 0) return;
-            // 我发出的私聊回显 → 同一会话窗格,灰色区分
-            appendTo(rest.substring(0, p), "<font color=\"#888888\">我: " + rest.substring(p + 1) + "</font>");
+            // 我发出的私聊回显: PMSENT <id> <目标> <正文> → 同一会话,灰色区分
+            String[] t = split3(cmd.substring(7));
+            if(t == null) return;
+            ensureConv(t[1]).addOrUpdate("m" + t[0],
+                "<font color=\"" + Theme.SELF + "\">我: " + t[2] + "</font>");
+        } else if(cmd.startsWith("LOST")) {
+            // 断线(功能十一):红字提示 + 自动重连
+            appendTo(MAIN_ROOM, "<font color=\"" + Theme.ERR + "\">与服务器的连接已断开,自动重连中...</font>");
+            startAutoReconnect();
+        } else if(cmd.startsWith("FSTART ")) {
+            fileStart(cmd.substring(7));
+        } else if(cmd.startsWith("FCHUNK ")) {
+            fileChunk(cmd.substring(7));
+        } else if(cmd.startsWith("FEND ")) {
+            fileEnd(cmd.substring(5).trim());
         } else if(cmd.startsWith("FILEP ")) {
-            receiveFile(cmd.substring(6), null); // null=按发送者路由进私聊会话
+            receiveFile(cmd.substring(6), null); // 旧版单包文件(兼容保留)
         } else if(cmd.startsWith("FILE ")) {
-            receiveFile(cmd.substring(5), MAIN_ROOM); // 群发文件进公共聊天室
+            receiveFile(cmd.substring(5), MAIN_ROOM);
         } else if(cmd.startsWith("USERINFO ")) {
             showUserInfo(cmd.substring(9));
         }
     }
-    // 接收文件：解码 Base64 存到 用户主目录\ChatDownloads\，图片内嵌显示。
-    // route=目标会话窗格；传 null 表示私发文件，按发送者路由进对应私聊会话
+    // 把 "a b 其余部分" 切成三段(前两段无空格,第三段可含任意内容)
+    private String[] split3(String s) {
+        int a = s.indexOf(' ');
+        int b = (a < 0) ? -1 : s.indexOf(' ', a + 1);
+        if(b < 0) return null;
+        return new String[]{ s.substring(0, a), s.substring(a + 1, b), s.substring(b + 1) };
+    }
+    private void markUnread(String conv) {
+        if(!conv.equals(currentConv)) { unread.add(conv); rebuildConvList(); }
+    }
+    // 接收方文件展示 HTML:图片缩略图内嵌/视频点击播放/文件点击打开(收发两侧规则一致)
+    private String buildRecvHtml(String sender, java.io.File out, String fname) {
+        String lower = fname.toLowerCase();
+        String uri = "" + out.toURI();
+        if(lower.endsWith(".png") || lower.endsWith(".jpg")
+            || lower.endsWith(".jpeg") || lower.endsWith(".gif")) {
+            return "<font color=\"" + Theme.PRIV + "\">[图片] 来自 " + sender + ": " + fname
+                    + "</font>（<a href=\"" + uri + "\">查看原图</a>）<br><img src=\"" + uri + "\"" + imgSizeAttr(out) + ">";
+        } else if(lower.endsWith(".mp4") || lower.endsWith(".avi") || lower.endsWith(".mkv")
+            || lower.endsWith(".mov") || lower.endsWith(".wmv")) {
+            return "<font color=\"" + Theme.PRIV + "\">[视频] 来自 " + sender + ": " + fname
+                    + "（已保存，<a href=\"" + uri + "\">点击播放</a>）</font>";
+        }
+        return "<font color=\"" + Theme.PRIV + "\">[文件] 来自 " + sender + ": " + fname
+                + "（已保存到 " + out.getAbsolutePath() + "，<a href=\"" + uri + "\">打开</a>）</font>";
+    }
+    // 旧版单包文件接收(兼容保留):解码 Base64 存盘后展示
     private void receiveFile(String rest, String route) {
         try {
             int p1 = rest.indexOf(' ');
@@ -222,32 +334,76 @@ public class ChatClient extends JFrame implements KeyListener, ActionListener, F
             // 文件名来自网络，剥掉路径分隔符防止目录穿越（如 ..\evil.exe 写到别处）
             String fname = rest.substring(p1 + 1, p2).replace('\\', '_').replace('/', '_');
             byte[] data = Base64.getDecoder().decode(rest.substring(p2 + 1));
-            java.io.File dir = new java.io.File(System.getProperty("user.home"), "ChatDownloads");
-            dir.mkdirs();
-            java.io.File out = new java.io.File(dir, fname);
-            if(out.exists()) out = new java.io.File(dir, System.currentTimeMillis() + "_" + fname);
+            java.io.File out = downloadTarget(fname);
             java.nio.file.Files.write(out.toPath(), data);
-            String lower = fname.toLowerCase();
-            String uri = "" + out.toURI();
-            if(lower.endsWith(".png") || lower.endsWith(".jpg")
-                || lower.endsWith(".jpeg") || lower.endsWith(".gif")) {
-                // 聊天区是 HTML 渲染，图片用 <img> 内嵌显示（文档要求⑥）。
-                // 按 240px 上限等比缩小成缩略图，避免大图撑爆聊天区；点链接看原图
-                String size = imgSizeAttr(out);
-                appendTo(pane, "<font color=\"#9933cc\">[图片] 来自 " + sender + ": " + fname
-                        + "</font>（<a href=\"" + uri + "\">查看原图</a>）<br><img src=\"" + uri + "\"" + size + ">");
-            } else if(lower.endsWith(".mp4") || lower.endsWith(".avi") || lower.endsWith(".mkv")
-                || lower.endsWith(".mov") || lower.endsWith(".wmv")) {
-                // 视频不做内嵌播放（JEditorPane 无 video 能力），点击调系统默认播放器
-                appendTo(pane, "<font color=\"#9933cc\">[视频] 来自 " + sender + ": " + fname
-                        + "（已保存，<a href=\"" + uri + "\">点击播放</a>）</font>");
-            } else {
-                appendTo(pane, "<font color=\"#9933cc\">[文件] 来自 " + sender + ": " + fname
-                        + "（已保存到 " + out.getAbsolutePath() + "，<a href=\"" + uri + "\">打开</a>）</font>");
-            }
+            appendTo(pane, buildRecvHtml(sender, out, fname));
         } catch(Exception ex) {
-            appendTo(MAIN_ROOM, "<font color=\"#ff0000\">接收文件失败: " + ex.getMessage() + "</font>");
+            appendTo(MAIN_ROOM, "<font color=\"" + Theme.ERR + "\">接收文件失败: " + ex.getMessage() + "</font>");
         }
+    }
+    private java.io.File downloadTarget(String fname) {
+        java.io.File dir = new java.io.File(System.getProperty("user.home"), "ChatDownloads");
+        dir.mkdirs();
+        java.io.File out = new java.io.File(dir, fname);
+        if(out.exists()) out = new java.io.File(dir, System.currentTimeMillis() + "_" + fname);
+        return out;
+    }
+    // ===== 分块文件接收(功能十二):FSTART 建档开流 → FCHUNK 顺序落盘+进度 → FEND 定稿展示 =====
+    static class FileRecv {
+        String sender, fname, pane;
+        long size;
+        int count, got, lastPct = -1;
+        java.io.File out;
+        java.io.FileOutputStream os;
+    }
+    private void fileStart(String rest) {
+        try { // FSTART <发送者> <P|B> <tid> <文件名> <大小> <块数>
+            StringTokenizer st = new StringTokenizer(rest);
+            FileRecv r = new FileRecv();
+            r.sender = st.nextToken();
+            String scope = st.nextToken();
+            String tid = st.nextToken();
+            r.fname = st.nextToken().replace('\\', '_').replace('/', '_'); // 防目录穿越
+            r.size = Long.parseLong(st.nextToken());
+            r.count = Integer.parseInt(st.nextToken());
+            r.pane = "P".equals(scope) ? r.sender : MAIN_ROOM;
+            r.out = downloadTarget(r.fname);
+            r.os = new java.io.FileOutputStream(r.out);
+            recvs.put(tid, r);
+            ensureConv(r.pane).addOrUpdate(tid, "<font color=\"" + Theme.PRIV + "\">[文件] 来自 "
+                    + r.sender + ": " + r.fname + " 接收中 0%</font>");
+        } catch(Exception ex) {
+            appendTo(MAIN_ROOM, "<font color=\"" + Theme.ERR + "\">接收文件失败: " + ex.getMessage() + "</font>");
+        }
+    }
+    private void fileChunk(String rest) {
+        try { // FCHUNK <tid> <序号> <Base64块>
+            int a = rest.indexOf(' ');
+            int b = rest.indexOf(' ', a + 1);
+            if(b < 0) return;
+            String tid = rest.substring(0, a);
+            FileRecv r = (FileRecv)recvs.get(tid);
+            if(r == null) return;
+            r.os.write(Base64.getDecoder().decode(rest.substring(b + 1))); // TCP+FIFO 队列保证块按序到达
+            r.got++;
+            int pct = (int)(r.got * 100L / r.count);
+            if(pct != r.lastPct) { // 进度只在百分比变化时重绘,避免高频重渲染
+                r.lastPct = pct;
+                ensureConv(r.pane).addOrUpdate(tid, "<font color=\"" + Theme.PRIV + "\">[文件] 来自 "
+                        + r.sender + ": " + r.fname + " 接收中 " + pct + "%</font>");
+            }
+        } catch(Exception ex) {}
+    }
+    private void fileEnd(String tid) {
+        try {
+            FileRecv r = (FileRecv)recvs.remove(tid);
+            if(r == null) return;
+            r.os.close();
+            String warn = (r.out.length() != r.size)
+                ? "<font color=\"" + Theme.ERR + "\">(大小不符,可能不完整)</font>" : "";
+            ensureConv(r.pane).addOrUpdate(tid, buildRecvHtml(r.sender, r.out, r.fname) + warn);
+            markUnread(r.pane);
+        } catch(Exception ex) {}
     }
     // ===== 会话管理 =====
     private ClientHistory ensureConv(String name) {
@@ -368,23 +524,60 @@ public class ChatClient extends JFrame implements KeyListener, ActionListener, F
         return "";
     }
     // 自己发出的图片/视频/文件在本端同样可查看：直接引用本地原文件展示（无需等对方转发）
-    void showSentFile(String target, java.io.File f, String fname) {
-        String pane = "*".equals(target) ? MAIN_ROOM : target;
+    String buildSentHtml(String target, java.io.File f, String fname) {
         String uri = "" + f.toURI();
-        String head = "<font color=\"#888888\">我" + ("*".equals(target) ? "(群发)" : "") + ": </font>";
+        String head = "<font color=\"" + Theme.SELF + "\">我" + ("*".equals(target) ? "(群发)" : "") + ": </font>";
         String lower = fname.toLowerCase();
         if(lower.endsWith(".png") || lower.endsWith(".jpg")
             || lower.endsWith(".jpeg") || lower.endsWith(".gif")) {
-            appendTo(pane, head + "<font color=\"#9933cc\">[图片] " + fname
-                    + "</font>（<a href=\"" + uri + "\">查看原图</a>）<br><img src=\"" + uri + "\"" + imgSizeAttr(f) + ">");
+            return head + "<font color=\"" + Theme.PRIV + "\">[图片] " + fname
+                    + "</font>（<a href=\"" + uri + "\">查看原图</a>）<br><img src=\"" + uri + "\"" + imgSizeAttr(f) + ">";
         } else if(lower.endsWith(".mp4") || lower.endsWith(".avi") || lower.endsWith(".mkv")
             || lower.endsWith(".mov") || lower.endsWith(".wmv")) {
-            appendTo(pane, head + "<font color=\"#9933cc\">[视频] " + fname
-                    + "（<a href=\"" + uri + "\">点击播放</a>）</font>");
-        } else {
-            appendTo(pane, head + "<font color=\"#9933cc\">[文件] " + fname
-                    + "（<a href=\"" + uri + "\">打开</a>）</font>");
+            return head + "<font color=\"" + Theme.PRIV + "\">[视频] " + fname
+                    + "（<a href=\"" + uri + "\">点击播放</a>）</font>";
         }
+        return head + "<font color=\"" + Theme.PRIV + "\">[文件] " + fname
+                + "（<a href=\"" + uri + "\">打开</a>）</font>";
+    }
+    // ===== 分块发送(功能十二):切块编号,块间隙让聊天消息插队(交织发送),双侧实时进度 =====
+    void sendFileChunked(final String target, final java.io.File f) {
+        final String fname = f.getName().replace(' ', '_');
+        final String tid = "t" + System.currentTimeMillis() + "_" + (++tidCounter);
+        final String pane = "*".equals(target) ? MAIN_ROOM : target;
+        new Thread() { public void run() {
+            try {
+                int CHUNK = 64 * 1024; // 64KB/块:Base64 后约 87KB,兼顾单条消息大小与总块数
+                long size = f.length();
+                int count = (int)((size + CHUNK - 1) / CHUNK);
+                if(count == 0) count = 1;
+                ck.sendMessage("/fstart " + target + " " + tid + " " + fname + " " + size + " " + count);
+                java.io.FileInputStream in = new java.io.FileInputStream(f);
+                byte[] buf = new byte[CHUNK];
+                int lastPct = -1;
+                for(int i = 0; i < count; i++) {
+                    int n = in.read(buf);
+                    if(n < 0) n = 0;
+                    byte[] part = new byte[n];
+                    System.arraycopy(buf, 0, part, 0, n);
+                    // 交织发送:发送队列有积压就等一等,让期间输入的聊天消息插进块间隙
+                    while(ck.pendingCount() > 1) { try { Thread.sleep(15); } catch(Exception e) {} }
+                    ck.sendMessage("/fchunk " + tid + " " + i + " " + Base64.getEncoder().encodeToString(part));
+                    int pct = (int)((i + 1) * 100L / count);
+                    if(pct != lastPct) { // 进度只在百分比变化时重绘
+                        lastPct = pct;
+                        ensureConv(pane).addOrUpdate(tid, "<font color=\"" + Theme.SELF + "\">我"
+                                + ("*".equals(target) ? "(群发)" : "") + ": </font><font color=\"" + Theme.PRIV
+                                + "\">[文件] " + fname + " 发送中 " + pct + "%</font>");
+                    }
+                }
+                in.close();
+                ck.sendMessage("/fend " + tid);
+                ensureConv(pane).addOrUpdate(tid, buildSentHtml(target, f, fname));
+            } catch(Exception ex) {
+                appendTo(MAIN_ROOM, "<font color=\"" + Theme.ERR + "\">发送文件失败: " + ex.getMessage() + "</font>");
+            }
+        }}.start();
     }
     // 渲染 USERINFO 推送到右侧信息栏，格式："用户 字段: 值|字段: 值"
     private void showUserInfo(String rest) {
@@ -392,14 +585,15 @@ public class ChatClient extends JFrame implements KeyListener, ActionListener, F
         String user = (p < 0) ? rest : rest.substring(0, p);
         if(MAIN_ROOM.equals(currentConv) || !user.equalsIgnoreCase(currentConv)) return; // 只更新当前会话对象
         String html = "<b>" + user + "</b><br>";
-        html += containsIgnoreCase(online, user) ? "<font color=\"#00aa00\">[在线]</font><br>"
-                                                 : "<font color=\"#888888\">[离线]</font><br>";
+        html += containsIgnoreCase(online, user) ? "<font color=\"" + Theme.OK + "\">[在线]</font><br>"
+                                                 : "<font color=\"" + Theme.SELF + "\">[离线]</font><br>";
         if(p < 0) html += "<br>暂无个人信息";
         else {
             StringTokenizer st = new StringTokenizer(rest.substring(p + 1), "|");
             while(st.hasMoreTokens()) html += "<br>" + st.nextToken();
         }
-        infoPane.setText(html);
+        rawInfoHtml = html; // 存原始(占位符)版本,切主题时可重渲染
+        infoPane.setText(Theme.apply(html));
     }
     // 收到服务器改名成功回执时，把最新昵称同步到顶部 Nick 框。
     // 只认以 "Server:" 开头的消息：聊天广播都带 "昵称:" 前缀，不会被别人发的内容伪造
@@ -411,6 +605,7 @@ public class ChatClient extends JFrame implements KeyListener, ActionListener, F
     }
     private void connect() {
         try {
+            reconnecting = false; // 手动连接取消进行中的自动重连
             if(ck!=null) ck.dropMe();
             ck = new ClientKernel(txtHost.getText(), Integer.parseInt(txtPort.getText()));
             // 昵称框还是占位符 "YourName" 时不自动改名，否则多个客户端会互相抢注同一个名字
@@ -419,25 +614,74 @@ public class ChatClient extends JFrame implements KeyListener, ActionListener, F
             if(nickSet) ck.setNick(txtNick.getText());
             if(ck.isConnected()) {
                 ck.addClient(this);
-                addMsg("<font color=\"#00ff00\">connected! Local Port:" + ck.getLocalPort() + "</font>");
+                addMsg("<font color=\"" + Theme.OK + "\">connected! Local Port:" + ck.getLocalPort() + "</font>");
                 if(!nickSet) addMsg("提示：昵称框未填写，当前昵称为端口号，可在上方 Nick 框输入名字后回车，或发送 /nick 名字 修改");
             } else {
-                addMsg("<font color=\"#ff0000\">connect failed！</font>");
+                addMsg("<font color=\"" + Theme.ERR + "\">connect failed！</font>");
             }
         } catch(Exception e) { e.printStackTrace(); }
     }
-    private void send() {
-        if(ck == null || !ck.isConnected()) { // 未连接就点 Send：原代码此处 NPE 崩溃
-            addMsg("<font color=\"#ff0000\">尚未连接服务器，请先点击 Connect</font>");
-            return;
+    // ===== 自动重连(功能十一):断线后每 3 秒尝试一次,成功后取回昵称并补发待发消息 =====
+    private void startAutoReconnect() {
+        if(reconnecting) return;
+        reconnecting = true;
+        new Thread() { public void run() {
+            for(int attempt = 1; reconnecting && attempt <= 30; attempt++) {
+                try { Thread.sleep(3000); } catch(Exception e) {}
+                if(!reconnecting) return; // 用户手动 Connect 了
+                appendTo(MAIN_ROOM, "<font color=\"" + Theme.SELF + "\">自动重连中(第 " + attempt + " 次)...</font>");
+                try {
+                    ClientKernel nk = new ClientKernel(txtHost.getText(), Integer.parseInt(txtPort.getText()));
+                    if(nk.isConnected()) {
+                        if(ck != null) ck.dropMe();
+                        ck = nk;
+                        ck.addClient(ChatClient.this);
+                        appendTo(MAIN_ROOM, "<font color=\"" + Theme.OK + "\">已自动重连! Local Port:"
+                                + ck.getLocalPort() + "</font>");
+                        String n = txtNick.getText().trim();
+                        if(n.length() > 0 && !n.equals(ChatClient.nickText)) ck.setNick(n); // 取回原昵称
+                        try { Thread.sleep(400); } catch(Exception e) {}
+                        flushPending();
+                        reconnecting = false;
+                        return;
+                    }
+                    nk.dropMe();
+                } catch(Exception ex) {}
+            }
+            reconnecting = false;
+            appendTo(MAIN_ROOM, "<font color=\"" + Theme.ERR + "\">自动重连失败,请手动 Connect</font>");
+        }}.start();
+    }
+    private void flushPending() {
+        while(pendingOut.size() > 0) {
+            ck.sendMessage((String)pendingOut.remove(0)); // 断线期间的消息按序补发
         }
+    }
+    private void send() {
         String toSend = msgWindow.getText();
         if(toSend == null || toSend.trim().length() == 0) return;
+        // 缓存注册/验证密码,断线自动重连后凭它自动取回注册昵称
+        if(toSend.startsWith("/register ") || toSend.startsWith("/verify ")) {
+            StringTokenizer st = new StringTokenizer(toSend);
+            String last = null;
+            while(st.hasMoreTokens()) last = st.nextToken();
+            if(last != null && !last.startsWith("/")) lastPassword = last;
+        }
         // 会话感知：私聊会话里输入的普通文字自动转为 /msg 对方 内容；命令(/开头)原样发
-        if(!MAIN_ROOM.equals(currentConv) && !toSend.startsWith("/"))
-            ck.sendMessage("/msg " + currentConv + " " + toSend);
-        else
-            ck.sendMessage(toSend);
+        String wire = (!MAIN_ROOM.equals(currentConv) && !toSend.startsWith("/"))
+                    ? "/msg " + currentConv + " " + toSend : toSend;
+        if(ck == null || !ck.isConnected()) {
+            if(reconnecting) { // 断线重连中:进待发队列,恢复后补发
+                pendingOut.add(wire);
+                appendTo(currentConv, "<font color=\"" + Theme.SELF + "\">[断线待发] " + toSend + "</font>");
+                lastMsg = "" + toSend;
+                msgWindow.setText("");
+                return;
+            }
+            addMsg("<font color=\"" + Theme.ERR + "\">尚未连接服务器，请先点击 Connect</font>");
+            return;
+        }
+        ck.sendMessage(wire);
         lastMsg = "" + toSend;
         msgWindow.setText("");
     }
@@ -465,36 +709,27 @@ public class ChatClient extends JFrame implements KeyListener, ActionListener, F
         if(e.getSource()==buttonConnect) connect();
         if(e.getSource()==buttonSend) send();
         if(e.getSource()==buttonFile) sendFile();
+        if(e.getSource()==buttonScan) scanLan();
+        if(e.getSource()==buttonTheme) { Theme.toggle(); applyTheme(); }
         if(e.getSource()==buttonAddFriend && !MAIN_ROOM.equals(currentConv)
             && ck != null && ck.isConnected())
             ck.sendMessage("/addfriend " + currentConv); // 右栏一键加好友，回执进公共聊天室
     }
-    // 发送文件/图片：右侧选中了人=私发给他，没选人=群发给所有人
+    // 发送文件/图片/视频:公共聊天室=群发,私聊会话=发给会话对方;走分块传输(功能十二)
     private void sendFile() {
         if(ck == null || !ck.isConnected()) {
-            addMsg("<font color=\"#ff0000\">尚未连接服务器，请先点击 Connect</font>");
+            addMsg("<font color=\"" + Theme.ERR + "\">尚未连接服务器，请先点击 Connect</font>");
             return;
         }
-        // 发送目标只由"当前在哪个会话"决定：公共聊天室=群发，私聊会话=发给会话对方。
-        // 不再参考右侧列表的选中状态——选中是不易察觉的隐藏状态，
-        // 曾导致在公共聊天室发文件被悄悄私发给之前点过的人
         String target = MAIN_ROOM.equals(currentConv) ? "*" : currentConv;
         JFileChooser fc = new JFileChooser();
         if(fc.showOpenDialog(this) != JFileChooser.APPROVE_OPTION) return;
         java.io.File f = fc.getSelectedFile();
-        if(f.length() > 20*1024*1024) { // 放宽到 20MB 以容纳短视频；单通道设计，传输期间该用户的聊天会短暂排队
-            addMsg("<font color=\"#ff0000\">文件过大（限 20MB）：" + f.getName() + "</font>");
+        if(f.length() > 200L*1024*1024) { // 分块传输解除了 20MB 限制,保留 200MB 上限防误操作
+            addMsg("<font color=\"" + Theme.ERR + "\">文件过大（限 200MB）：" + f.getName() + "</font>");
             return;
         }
-        try {
-            byte[] data = java.nio.file.Files.readAllBytes(f.toPath());
-            String b64 = Base64.getEncoder().encodeToString(data);
-            String fname = f.getName().replace(' ', '_'); // 协议按空格分隔字段，文件名里的空格转下划线
-            ck.sendFile(target, fname, b64);
-            showSentFile(target, f, fname); // 自己这端也立刻可见/可打开(引用本地原文件)
-        } catch(Exception ex) {
-            addMsg("<font color=\"#ff0000\">读取文件失败: " + ex.getMessage() + "</font>");
-        }
+        sendFileChunked(target, f);
     }
     public void focusGained(FocusEvent e) {
         if(e.getSource()==txtHost && txtHost.getText().equals(ChatClient.serverText)) txtHost.setText("");
@@ -507,9 +742,14 @@ public class ChatClient extends JFrame implements KeyListener, ActionListener, F
        if(e.getSource()==txtNick && txtNick.getText().equals(ChatClient.nickText)) 
                                                             txtNick.setText(ChatClient.nickText);
     }
+    // 聊天窗格(功能十四改造):消息按"行"存储,颜色一律写 %TOKEN% 占位符,
+    // 渲染时按当前主题替换 → 切换日夜主题即可对全部历史消息重渲染换色。
+    // 行可带键(消息ID/传输ID),按键可原位更新——进度条刷新与将来撤回/回执都靠它
     class ClientHistory extends JEditorPane {
+        private Vector lines = new Vector();     // 原始行(含占位符与时间戳前缀)
+        private HashMap keyIdx = new HashMap();  // 行键 -> 行号
         public ClientHistory() {
-            super("text/html", "" + ChatClient.appName);
+            super("text/html", "");
             setEditable(false);
             setAutoscrolls(true);
             // 点击聊天区里的链接（查看原图/播放视频/打开文件）→ 交给系统默认程序
@@ -521,19 +761,41 @@ public class ChatClient extends JFrame implements KeyListener, ActionListener, F
                     }
                 }
             });
+            renderAll();
+        }
+        private String stamp(String str) {
+            String t = new java.text.SimpleDateFormat("HH:mm").format(new java.util.Date());
+            return "<font color=\"" + Theme.TIME + "\">[" + t + "]</font> " + str;
         }
         public void addText(String str) {
-            String html = getText();
-            int end = html.lastIndexOf("</body>");
-            String startStr = html.substring(0, end);
-            String endStr = html.substring(end, html.length());
-            String newHtml = startStr + "<br>" + str + endStr;
-            setText(newHtml);
-            setSelectionStart(newHtml.length()-1);
-            setSelectionEnd(newHtml.length());
-         }
+            lines.add(stamp(str));
+            renderAll();
+        }
+        // 带键追加/原位更新:同键第二次调用替换原行(文件进度、将来的撤回与回执)
+        public void addOrUpdate(String key, String str) {
+            Integer i = (Integer)keyIdx.get(key);
+            if(i == null) {
+                keyIdx.put(key, Integer.valueOf(lines.size()));
+                lines.add(stamp(str));
+            } else {
+                lines.set(i.intValue(), stamp(str));
+            }
+            renderAll();
+        }
+        public void renderAll() {
+            setBackground(Theme.bgColor());
+            StringBuffer sb = new StringBuffer("<html><body style=\"color:")
+                .append(Theme.fg()).append(";background-color:").append(Theme.bg()).append("\">");
+            for(int i=0;i<lines.size();i++)
+                sb.append("<br>").append(Theme.apply((String)lines.get(i)));
+            sb.append("</body></html>");
+            setText(sb.toString());
+            try { setCaretPosition(getDocument().getLength()); } catch(Exception e) {}
+        }
         public void clear() {
-            setText("");
+            lines.clear();
+            keyIdx.clear();
+            renderAll();
         }
     }
 }
