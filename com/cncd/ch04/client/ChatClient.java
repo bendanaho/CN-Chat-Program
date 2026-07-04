@@ -1601,7 +1601,9 @@ public class ChatClient extends JFrame implements KeyListener, ActionListener, F
             m.time = p[2];
             try { m.rid = Long.parseLong(p[3]); } catch(Exception e) {}
             m.body = p[4];
-            if(m.rid > 0) keyIdx.put("m" + m.rid, Integer.valueOf(msgs.size()));
+            m.rid = -1; // 历史消息:清掉可寻址 id —— 服务器重启后消息 ID 会从头重排,
+            //            若保留旧 id 作键,新会话首条消息(同 id)会误覆盖这条历史。
+            //            历史消息本就不可再撤回/更新,不登记键即可,只作只读展示。
             msgs.add(m);
         }
         private String renderMsg(Msg m) {
