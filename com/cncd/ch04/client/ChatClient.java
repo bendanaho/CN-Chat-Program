@@ -127,7 +127,7 @@ public class ChatClient extends JFrame implements KeyListener, ActionListener, F
         northPanel.add(connPanel, BorderLayout.WEST);
         northPanel.add(infoPanel, BorderLayout.CENTER);
         northPanel.add(buttonTheme, BorderLayout.EAST);
-        northPanel.setPreferredSize(new Dimension(0, 150)); // 抬高顶部,给输入框留够行高(雅黑+Nimbus 比 Metal 需要更高),避免文字被竖向裁切
+        northPanel.setPreferredSize(new Dimension(0, 172)); // 抬高顶部,给输入框留够行高(含 g/p/y 等下伸笔画),避免雅黑+Nimbus 下文字被竖向裁切
         buttonConnect.addActionListener(this);
         buttonScan.addActionListener(this);
         buttonTheme.addActionListener(this);
