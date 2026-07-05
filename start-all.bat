@@ -1,6 +1,6 @@
 @echo off
 rem One-click: compile + start server (if not already running) + open 2 client windows
-set JDK=C:\Program Files\Eclipse Adoptium\jdk-17.0.19.10-hotspot\bin
+set JDK=C:\Program Files\Java\jdk-17\bin
 cd /d "%~dp0"
 
 echo [1/3] Compiling...

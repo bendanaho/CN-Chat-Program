@@ -48,6 +48,7 @@ public class ChatClient extends JFrame implements KeyListener, ActionListener, F
     HashMap sentPm = new HashMap();     // 我发出的私聊 id -> {会话, 正文},收到 READ 时更新已读(功能十九)
     HashMap lastRecvId = new HashMap(); // 会话 -> 最近收到的对方私聊消息 id(打开会话时回执,功能十九)
     JButton buttonRoom;                 // 加入/创建群组
+    JButton buttonAnnounce; // 新增：管理员公告按钮
     JLabel statusBar, typingLabel, peerTitle; // 状态栏/正在输入/右栏标题(对方信息↔群成员)
     long lastTypingSent = 0;            // /typing 节流
     javax.swing.Timer typingClearTimer; // 定时清除"对方正在输入"
@@ -147,6 +148,10 @@ public class ChatClient extends JFrame implements KeyListener, ActionListener, F
         msgWindow = new JTextField();
         msgWindow.setFont(new Font("Microsoft YaHei", Font.PLAIN, 14));
         JPanel sendBtns = new JPanel(new FlowLayout(FlowLayout.RIGHT, 4, 0));
+        // 新增：初始化公告按钮，默认隐藏
+        sendBtns.add(buttonAnnounce = new JButton("公告"));
+        buttonAnnounce.setVisible(false);
+        buttonAnnounce.addActionListener(this);
         sendBtns.add(buttonEmote = new JButton("表情"));
         sendBtns.add(buttonVoice = new JButton("按住说话"));
         sendBtns.add(buttonFile = new JButton("文件"));
@@ -1224,6 +1229,34 @@ public class ChatClient extends JFrame implements KeyListener, ActionListener, F
             }
         });
         menu.add(shake);
+            // 新增：如果是管理员登录，右键菜单动态展示管理功能
+        if (myNick.equalsIgnoreCase("penguin") || myNick.equalsIgnoreCase("Brendan")) {
+            menu.addSeparator();
+            
+            JMenuItem kickItem = new JMenuItem("踢出该用户 (管理员)");
+            kickItem.addActionListener(new ActionListener() {
+                public void actionPerformed(ActionEvent ev) {
+                    if(ck != null && ck.isConnected()) ck.sendMessage("/kick " + name);
+                }
+            });
+            menu.add(kickItem);
+
+            JMenuItem muteItem = new JMenuItem("禁言该用户 (管理员)");
+            muteItem.addActionListener(new ActionListener() {
+                public void actionPerformed(ActionEvent ev) {
+                    if(ck != null && ck.isConnected()) ck.sendMessage("/mute " + name);
+                }
+            });
+            menu.add(muteItem);
+
+            JMenuItem unmuteItem = new JMenuItem("解除禁言 (管理员)");
+            unmuteItem.addActionListener(new ActionListener() {
+                public void actionPerformed(ActionEvent ev) {
+                    if(ck != null && ck.isConnected()) ck.sendMessage("/unmute " + name);
+                }
+            });
+            menu.add(unmuteItem);
+        }
         menu.show(userList, e.getX(), e.getY());
     }
     // 会话列表右键菜单：仅好友条目提供"删除好友"
@@ -1376,6 +1409,13 @@ public class ChatClient extends JFrame implements KeyListener, ActionListener, F
             loadOwnerHistory(); // 身份确立/切换 → 载入该身份的历史(同身份自动跳过)
             // 昵称确立即拉取自己的信息回填顶部编辑区
             if(ck != null && ck.isConnected()) ck.sendMessage("/infoq " + nk);
+            // 新增：确立权威昵称后，如果是管理员则显示“公告”按钮，否则隐藏
+            if (buttonAnnounce != null) {
+                boolean isAdmin = myNick.equalsIgnoreCase("penguin") || myNick.equalsIgnoreCase("Brendan");
+                buttonAnnounce.setVisible(isAdmin);
+                buttonAnnounce.getParent().revalidate();
+                buttonAnnounce.getParent().repaint();
+            }
         }
     }
     // ===== 个人资料表格(个人信息功能的界面化) =====
@@ -1572,6 +1612,14 @@ public class ChatClient extends JFrame implements KeyListener, ActionListener, F
         if(e.getSource()==buttonAddFriend && !MAIN_ROOM.equals(currentConv)
             && ck != null && ck.isConnected())
             ck.sendMessage("/addfriend " + currentConv); // 右栏一键加好友，回执进公共聊天室
+        if(e.getSource()==buttonRegister) doRegister();
+        // 新增：管理员公告按钮点击响应
+        if(e.getSource()==buttonAnnounce) {
+            String msg = JOptionPane.showInputDialog(this, "请输入需要全服群发的公告内容:", "发布系统公告 (管理员)", JOptionPane.WARNING_MESSAGE);
+            if(msg != null && msg.trim().length() > 0 && ck != null && ck.isConnected()) {
+                ck.sendMessage("/announce " + msg.trim());
+            }
+        }
     }
     // 发送文件/图片/视频:公共聊天室=群发,私聊会话=发给会话对方;走分块传输(功能十二)
     private void sendFile() {
