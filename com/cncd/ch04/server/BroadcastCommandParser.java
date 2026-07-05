@@ -173,6 +173,7 @@ public class BroadcastCommandParser implements CommandParser {
             cc.sendMessage("不能私聊自己");
             return;
         }
+        if(MainServer.isMuted(cc.nick)) { cc.muteNotice(); return; } // 禁言覆盖私聊(功能十八)
         // 私聊为机器可读推送(带消息唯一 ID)：接收方 0x01 PM <id> 发送者 正文，
         // 发送方回显 0x01 PMSENT <id> 目标 正文。id 记录作用域=目标昵称,供已读回执/撤回定位
         long id = MainServer.nextMsgId();
@@ -215,6 +216,7 @@ public class BroadcastCommandParser implements CommandParser {
         String target = st.nextToken(), tid = st.nextToken(), fname = st.nextToken();
         String size = st.nextToken(), count = st.nextToken();
         if(target.equalsIgnoreCase(cc.nick)) { cc.sendMessage("不能给自己发文件"); return; }
+        if(MainServer.isMuted(cc.nick)) { cc.muteNotice(); return; } // 禁言覆盖文件/图片/语音/自定义表情(功能十八)
         // 给这次文件传输分配消息 ID 并记录作用域(群发=*、私发=对方昵称),
         // 使文件/图片/表情也能像文字消息一样撤回(功能二十);ID 随 FSTART 下发给接收方,
         // 另用 FID 回传给发送方 —— 双方据此把文件气泡挂上可撤回的 ID。
@@ -405,7 +407,7 @@ public class BroadcastCommandParser implements CommandParser {
         if(sb.length() == 0) return;
         long id = MainServer.nextMsgId();
         String push = "" + MainServer.PUSHMARKER + "ROOM " + id + " " + room + " " + cc.nick + " " + sb;
-        if(MainServer.isMuted(cc.nick)) { cc.sendMessage(push); return; } // 禁言:只回显自己
+        if(MainServer.isMuted(cc.nick)) { cc.muteNotice(); return; } // 禁言:丢弃并提示未发送,不回显假气泡
         MainServer.recordMsg(id, cc.nick, "#" + room);
         sendToRoom(room, push, cc);
     }
@@ -670,6 +672,7 @@ public class BroadcastCommandParser implements CommandParser {
     }
     // ===== 文件传输：/file <目标|*> <文件名> <Base64>，Base64 为纯 ASCII 不与协议字节冲突（要求⑥⑦） =====
     private void fileTransfer(ConnectedClient cc, StringTokenizer strTok) {
+        if(MainServer.isMuted(cc.nick)) { cc.muteNotice(); return; } // 禁言覆盖单包文件(功能十八)
         if(!strTok.hasMoreTokens()) { cc.sendMessage("usage: /file <user|*> <filename> <base64>"); return; }
         String target = strTok.nextToken();
         if(!strTok.hasMoreTokens()) { cc.sendMessage("usage: /file <user|*> <filename> <base64>"); return; }

@@ -36,6 +36,15 @@ public class ConnectedClient {
     public void sendMessage(String str) {
         msgSend.addMessage(str);
     }
+    // 被禁言者尝试发言时的节流提示(功能十八):同一状态 5 秒内只提示一次,避免连发刷屏
+    private long lastMuteNotice = 0;
+    public void muteNotice() {
+        long now = System.currentTimeMillis();
+        if(now - lastMuteNotice > 5000) {
+            lastMuteNotice = now;
+            sendMessage("<font color=\"#ff8800\">你处于禁言状态，消息未发送</font>");
+        }
+    }
     public boolean sendTo(String user, String msg) {
         return ck.sendTo(this, user, msg);
     }
@@ -170,7 +179,7 @@ class ServerMsgListener extends Thread {
                     MainServer.recordMsg(id, cc.nick, "*");
                     String toSend = "" + MainServer.PUSHMARKER + "MSG " + id + " " + cc.nick + " " + body;
                     if(cc.printMsg) System.out.println("MsgListenet.run Sending msg: " + toSend);
-                    if(MainServer.isMuted(cc.nick)) cc.sendMessage(toSend); // 被禁言:只回显自己,不广播(功能十八)
+                    if(MainServer.isMuted(cc.nick)) cc.muteNotice(); // 被禁言:直接丢弃,不回显假气泡,只提示未发送(功能十八)
                     else cc.broadcastMessage(toSend);
                 } else {
                     // 准入门禁:未通过口令时只放行 enter 命令(功能十八)
