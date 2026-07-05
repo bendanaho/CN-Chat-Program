@@ -23,25 +23,26 @@ public class Theme {
     public static boolean isDark() { return dark; }
     public static void toggle() { dark = !dark; save(); }
     public static String bg() { return dark ? "#1e1f22" : "#ffffff"; }
-    public static String fg() { return dark ? "#e8e8e8" : "#000000"; }
+    public static String fg() { return dark ? "#e8e8e8" : "#1c1e21"; }
     public static Color bgColor()      { return Color.decode(bg()); }
     public static Color fgColor()      { return Color.decode(fg()); }
-    public static Color panelColor()   { return dark ? Color.decode("#2b2d31") : Color.decode("#f0f2f5"); }
-    public static String chatBg()      { return dark ? "#232428" : "#ededed"; } // 微信式浅灰聊天背景
+    public static Color panelColor()   { return dark ? Color.decode("#2b2d31") : Color.decode("#eef0f4"); }
+    public static String chatBg()      { return dark ? "#26272b" : "#f3f4f6"; } // 微信式浅灰聊天背景
     public static Color chatBgColor()  { return Color.decode(chatBg()); }
     public static Color accentColor()  { return dark ? Color.decode("#3e5a4a") : Color.decode("#07c160"); } // 微信绿(气泡用)
+    public static Color borderColor()  { return dark ? Color.decode("#3a3c40") : Color.decode("#dcdfe4"); } // 柔和分隔线
     /** 把 HTML 中的颜色占位符替换为当前主题的实际色值 */
     public static String apply(String html) {
-        return html.replace(PRIV, dark ? "#c39bd3" : "#9933cc")
-                   .replace(WARN, dark ? "#ffb357" : "#ff8800")
-                   .replace(ERR,  dark ? "#ff7b72" : "#cc0000")
-                   .replace(OK,   dark ? "#7ee787" : "#008800")
-                   .replace(SELF, dark ? "#9aa0a6" : "#888888")
-                   .replace(TIME, dark ? "#707070" : "#999999")
+        return html.replace(PRIV, dark ? "#c9a3f0" : "#7c3aed")
+                   .replace(WARN, dark ? "#ffb357" : "#e8730c")
+                   .replace(ERR,  dark ? "#ff7b72" : "#d93025")
+                   .replace(OK,   dark ? "#7ee787" : "#1a7f37")
+                   .replace(SELF, dark ? "#9aa0a6" : "#8a9099")
+                   .replace(TIME, dark ? "#707070" : "#9aa0a6")
                    .replace(CHATBG,   chatBg())
                    .replace(SELFBUB,  dark ? "#2e4d3a" : "#95ec69")
                    .replace(OTHERBUB, dark ? "#3a3b3f" : "#ffffff")
-                   .replace(BUBTX,    dark ? "#e8e8e8" : "#111111");
+                   .replace(BUBTX,    dark ? "#e8e8e8" : "#1c1e21");
     }
     private static File prefFile() { return new File(System.getProperty("user.home"), ".chattool-theme"); }
     private static boolean load() {

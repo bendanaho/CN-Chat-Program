@@ -83,7 +83,9 @@ public class ChatClient extends JFrame implements KeyListener, ActionListener, F
         txtPort.setText("3500");
     }
     public void uiInit() {
-        setLayout(new BorderLayout());
+        setLayout(new BorderLayout(6, 6)); // 五区之间留间距,增加呼吸感
+        if(getContentPane() instanceof JComponent)
+            ((JComponent)getContentPane()).setBorder(BorderFactory.createEmptyBorder(6, 6, 6, 6)); // 窗口内边距
         //创建North:左=连接区(带标题框),中=个人资料表格,右=醒目的主题切换按钮
         JPanel connFields = new JPanel(new GridLayout(0,2,4,4));
         connFields.add(new JLabel(" 服务器:"));
@@ -125,7 +127,7 @@ public class ChatClient extends JFrame implements KeyListener, ActionListener, F
         northPanel.add(connPanel, BorderLayout.WEST);
         northPanel.add(infoPanel, BorderLayout.CENTER);
         northPanel.add(buttonTheme, BorderLayout.EAST);
-        northPanel.setPreferredSize(new Dimension(0, 128));
+        northPanel.setPreferredSize(new Dimension(0, 150)); // 抬高顶部,给输入框留够行高(雅黑+Nimbus 比 Metal 需要更高),避免文字被竖向裁切
         buttonConnect.addActionListener(this);
         buttonScan.addActionListener(this);
         buttonTheme.addActionListener(this);
@@ -615,10 +617,11 @@ public class ChatClient extends JFrame implements KeyListener, ActionListener, F
         java.io.File f = histFile(conv);
         if(f.exists()) f.delete();
     }
-    // 统一风格的分组标题边框
+    // 统一风格的分组标题边框:柔和细线 + 内边距,观感更精致
     private Border titled(String t) {
-        return BorderFactory.createTitledBorder(
-            BorderFactory.createLineBorder(Theme.panelColor().darker()), t);
+        return BorderFactory.createCompoundBorder(
+            BorderFactory.createTitledBorder(BorderFactory.createLineBorder(Theme.borderColor()), t),
+            BorderFactory.createEmptyBorder(2, 6, 4, 6));
     }
     private void setThemeButtonText() {
         // 图标放大到 30pt、文字放大到 16pt
@@ -629,6 +632,10 @@ public class ChatClient extends JFrame implements KeyListener, ActionListener, F
     // ===== 主题(功能十四):遍历组件树刷色 + 各会话窗格整体重渲染 =====
     private void applyTheme() {
         themeWalk(getContentPane());
+        // 内容面板(五区间隙与窗口内边距露出的就是它)强制不透明 + 主题色,夜间才不发白
+        Container cp = getContentPane();
+        cp.setBackground(Theme.panelColor());
+        if(cp instanceof JComponent) ((JComponent)cp).setOpaque(true);
         Iterator it = convs.values().iterator();
         while(it.hasNext()) ((ClientHistory)(it.next())).renderAll();
         infoPane.setText(Theme.apply(rawInfoHtml));
@@ -648,13 +655,24 @@ public class ChatClient extends JFrame implements KeyListener, ActionListener, F
     private void themeWalk(Component c) {
         if(c == buttonTheme) return; // 主题按钮保持强调色,不被统一刷成面板色
         if(c instanceof JPanel || c instanceof JScrollPane || c instanceof JViewport
-            || c instanceof JTableHeader)
+            || c instanceof JTableHeader) {
             c.setBackground(Theme.panelColor());
+            ((JComponent)c).setOpaque(true); // Nimbus 下不透明才会真正绘制背景色,否则间隙发白
+        }
+        // 滚动区边框跟随主题的柔和色,并清掉 Nimbus 默认的浅色内边框(viewportBorder),避免夜间白框
+        if(c instanceof JScrollPane) {
+            ((JScrollPane)c).setBorder(BorderFactory.createLineBorder(Theme.borderColor()));
+            ((JScrollPane)c).setViewportBorder(null);
+        }
         if(c instanceof JList || c instanceof JTextField || c instanceof JTable) {
             c.setBackground(Theme.bgColor());
             c.setForeground(Theme.fgColor());
         }
-        if(c instanceof ClientHistory) c.setBackground(Theme.chatBgColor()); // 聊天区用浅灰衬气泡
+        if(c instanceof ClientHistory) { // 聊天区用浅灰衬气泡,清掉自带边框
+            c.setBackground(Theme.chatBgColor());
+            ((JComponent)c).setOpaque(true);
+            ((JComponent)c).setBorder(BorderFactory.createEmptyBorder());
+        }
         if(c instanceof JLabel) c.setForeground(Theme.fgColor());
         if(c instanceof Container) {
             Component[] cs = ((Container)c).getComponents();
@@ -713,7 +731,28 @@ public class ChatClient extends JFrame implements KeyListener, ActionListener, F
             }
         }}.start();
     }
+    // ===== 界面外观(纯观感,不影响任何逻辑):Nimbus 现代外观 + 全局微软雅黑字体 =====
+    private static void setupLookAndFeel() {
+        try {
+            for(UIManager.LookAndFeelInfo info : UIManager.getInstalledLookAndFeels()) {
+                if("Nimbus".equals(info.getName())) { UIManager.setLookAndFeel(info.getClassName()); break; }
+            }
+        } catch(Exception e) {}
+        try {
+            javax.swing.plaf.FontUIResource f = new javax.swing.plaf.FontUIResource("Microsoft YaHei", Font.PLAIN, 13);
+            UIManager.getLookAndFeelDefaults().put("defaultFont", f); // Nimbus 基准字体
+            // 兼容:把当前外观里所有字体键统一替换为雅黑(先收集键再写,避免并发修改)
+            java.util.ArrayList<Object> fontKeys = new java.util.ArrayList<Object>();
+            java.util.Enumeration<Object> keys = UIManager.getLookAndFeelDefaults().keys();
+            while(keys.hasMoreElements()) {
+                Object k = keys.nextElement();
+                if(UIManager.getLookAndFeelDefaults().get(k) instanceof javax.swing.plaf.FontUIResource) fontKeys.add(k);
+            }
+            for(Object k : fontKeys) UIManager.getLookAndFeelDefaults().put(k, f);
+        } catch(Exception e) {}
+    }
    public static void main(String args[]) {
+        setupLookAndFeel();
         ChatClient client = new ChatClient();
         client.setTitle(client.appName);
         client.setSize(800, 540);
