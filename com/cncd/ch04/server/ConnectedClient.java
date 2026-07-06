@@ -150,7 +150,7 @@ class ServerMsgListener extends Thread {
                 int c;
                 sleep(10);
                 while( (c = dataIn.read()) != 0xff && c != -1) {
-                    baos.write(c);
+                    baos.write(c);// 攒到 0xFF
                     didRun = true;
                 }
                 if(c == -1) { cc.dropClient(); return; } // 对端断开，干净退出（原代码会死循环）

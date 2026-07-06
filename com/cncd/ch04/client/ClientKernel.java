@@ -252,7 +252,7 @@ class ClientMsgListener extends Thread{
                     if(c == -1) break;
                     ck.addBytesIn(baos.size() + 1); // 流量统计(功能十五)
                     if(baos.size() == 0) continue;
-                    String s = new String(com.cncd.ch04.common.CryptoUtil.unwrap(baos.toByteArray()), "UTF-8");
+                    String s = new String(com.cncd.ch04.common.CryptoUtil.unwrap(baos.toByteArray()), "UTF-8");// ← 整段一次性解码
                     if(s.length() > 3 && s.charAt(0) == ClientKernel.PUSHMARKER && s.startsWith("HB ", 1))
                         ck.onHb(s);
                     else
