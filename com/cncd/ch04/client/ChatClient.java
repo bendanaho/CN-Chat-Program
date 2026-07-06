@@ -109,6 +109,18 @@ public class ChatClient extends JFrame implements KeyListener, ActionListener, F
         infoTable = new JTable(infoModel);
         infoTable.setRowHeight(22);
         infoTable.getTableHeader().setReorderingAllowed(false);
+        // 表头("字段/内容")在 Nimbus 下无视 setForeground,改用自定义渲染器,绘制时按当前主题取色(夜间才看得清)
+        infoTable.getTableHeader().setDefaultRenderer(new DefaultTableCellRenderer() {
+            public Component getTableCellRendererComponent(JTable t, Object v, boolean s, boolean f, int r, int col) {
+                JLabel lb = (JLabel)super.getTableCellRendererComponent(t, v, s, f, r, col);
+                lb.setOpaque(true);
+                lb.setBackground(Theme.panelColor());
+                lb.setForeground(Theme.fgColor());
+                lb.setHorizontalAlignment(CENTER);
+                lb.setBorder(BorderFactory.createMatteBorder(0, 0, 1, 1, Theme.borderColor()));
+                return lb;
+            }
+        });
         JPanel infoPanel = new JPanel(new BorderLayout());
         infoPanel.setBorder(titled("个人资料(双击单元格编辑;内容留空并保存=删除该项)"));
         infoPanel.add(new JScrollPane(infoTable), BorderLayout.CENTER);
@@ -673,7 +685,19 @@ public class ChatClient extends JFrame implements KeyListener, ActionListener, F
             ((JComponent)c).setOpaque(true);
             ((JComponent)c).setBorder(BorderFactory.createEmptyBorder());
         }
-        if(c instanceof JLabel) c.setForeground(Theme.fgColor());
+        if(c instanceof JLabel || c instanceof JCheckBox) c.setForeground(Theme.fgColor()); // 复选框(提示音)文字也跟随主题
+        // 分组标题边框(连接/注册、个人资料)的标题文字与线条跟随主题——否则夜间标题字仍是深色看不清
+        if(c instanceof JComponent) {
+            Border bd = ((JComponent)c).getBorder();
+            TitledBorder tb = null;
+            if(bd instanceof TitledBorder) tb = (TitledBorder)bd;
+            else if(bd instanceof CompoundBorder && ((CompoundBorder)bd).getOutsideBorder() instanceof TitledBorder)
+                tb = (TitledBorder)((CompoundBorder)bd).getOutsideBorder();
+            if(tb != null) {
+                tb.setTitleColor(Theme.fgColor());
+                tb.setBorder(BorderFactory.createLineBorder(Theme.borderColor()));
+            }
+        }
         if(c instanceof Container) {
             Component[] cs = ((Container)c).getComponents();
             for(int i=0;i<cs.length;i++) themeWalk(cs[i]);
@@ -1208,7 +1232,10 @@ public class ChatClient extends JFrame implements KeyListener, ActionListener, F
         addConvItem("── 好友 ──", null);
         for(int i=0;i<friends.size();i++) {
             String f = (String)friends.get(i);
-            addConvItem(f + (containsIgnoreCase(online, f) ? " [在线]" : " [离线]"), f);
+            String st = containsIgnoreCase(online, f)
+                ? " <font color=\"#07c160\"><b>[在线]</b></font>"  // 在线:醒目绿色加粗
+                : " <font color=\"#9aa0a6\">[离线]</font>";         // 离线:弱化灰色
+            addConvItem("<html>" + esc(f) + st + "</html>", f);
         }
         if(rooms.size() > 0) {
             addConvItem("── 群组 ──", null);
@@ -1225,9 +1252,14 @@ public class ChatClient extends JFrame implements KeyListener, ActionListener, F
         if(cur >= 0) convList.setSelectedIndex(cur);
     }
     private void addConvItem(String display, String name) {
-        convModel.addElement((name != null && unread.contains(name) ? "● " : "") + display);
+        String dot = (name != null && unread.contains(name)) ? "● " : "";
+        // 未读点要放进 <html> 内部,否则前缀落在 html 标签外会破坏 HTML 渲染
+        String entry = display.startsWith("<html>") ? "<html>" + dot + display.substring(6) : dot + display;
+        convModel.addElement(entry);
         itemNames.add(name);
     }
+    // 好友名进 HTML 前做最小转义,防止昵称里的 < > & 破坏渲染
+    private String esc(String s) { return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"); }
     private boolean containsIgnoreCase(Vector v, String s) {
         for(int i=0;i<v.size();i++)
             if(s.equalsIgnoreCase((String)v.get(i))) return true;
@@ -1420,7 +1452,7 @@ public class ChatClient extends JFrame implements KeyListener, ActionListener, F
     private void showUserInfo(String rest) {
         int p = rest.indexOf(' ');
         String user = (p < 0) ? rest : rest.substring(0, p);
-        if(user.equalsIgnoreCase(txtNick.getText().trim())) { // 自己的信息 → 顶部"我的信息"编辑区
+        if(isMe(user)) { // 自己的信息 → 顶部"我的信息"编辑区(用权威昵称判断:txtNick 可能是占位符/不同步)
             populateMyInfo(p < 0 ? "" : rest.substring(p + 1));
             return;
         }
@@ -1458,34 +1490,50 @@ public class ChatClient extends JFrame implements KeyListener, ActionListener, F
         }
     }
     // ===== 个人资料表格(个人信息功能的界面化) =====
-    // 保存:逐行下发——有字段有内容 /setinfo,有字段没内容 /delinfo;完成后重新拉取回填
+    // 上次从服务器回填时"我拥有哪些字段",保存时据此算出被删/删行/改名的字段并补删(功能五删除修复)
+    private final java.util.HashSet loadedFields = new java.util.HashSet();
+    // 保存:逐行下发——有字段有内容 /setinfo,有字段没内容 /delinfo;此外原有但表里已消失的字段也删;完成后重新拉取回填
     private void saveMyInfo() {
         if(ck == null || !ck.isConnected()) {
             addMsg("<font color=\"" + Theme.ERR + "\">尚未连接服务器，请先点击 Connect</font>");
             return;
         }
         if(infoTable.isEditing()) infoTable.getCellEditor().stopCellEditing(); // 提交正在编辑的单元格
+        java.util.HashSet current = new java.util.HashSet(); // 当前表里还留着的字段名(小写)
         for(int i=0;i<infoModel.getRowCount();i++) {
             String f = ("" + val(i,0)).trim().replace(' ', '_'); // 字段名在协议中是单个词
             String v = ("" + val(i,1)).trim();
-            if(f.length() == 0) continue;
-            if(v.length() == 0) ck.sendMessage("/delinfo " + f);
-            else ck.sendMessage("/setinfo " + f + " " + v);
+            if(f.length() == 0) continue;                        // 字段名空(整行被清空)→ 交给下面"原有字段差集"删除
+            current.add(f.toLowerCase());
+            if(v.length() == 0) ck.sendMessage("/delinfo " + f); // 有字段、没内容 → 删该项(提示语说的这种)
+            else ck.sendMessage("/setinfo " + f + " " + v);      // 有字段、有内容 → 存/改
         }
-        String n = txtNick.getText().trim();
+        // ★关键修复:原来有、现在整行被清空/删行/改名的字段,表里已找不到 → 也要发 /delinfo,否则服务器仍留着、别人还看得到
+        Iterator lf = loadedFields.iterator();
+        while(lf.hasNext()) {
+            String field = (String)lf.next();
+            if(!current.contains(field.toLowerCase())) ck.sendMessage("/delinfo " + field);
+        }
+        // 用服务器确认的 myNick 重新拉取回填(比可编辑的 txtNick 可靠;txtNick 可能还是占位符"YourName"→旧逻辑不发 /infoq→表格不刷新→看着像没删)
+        String n = (myNick.length() > 0) ? myNick : txtNick.getText().trim();
         if(n.length() > 0 && !n.equals(ChatClient.nickText))
-            ck.sendMessage("/infoq " + n); // FIFO 保证在上面的写操作之后处理,拿到的是最新状态
+            ck.sendMessage("/infoq " + n); // FIFO 保证在上面的删除写操作之后处理,拿到的是最新状态
     }
     private Object val(int r, int c) { Object o = infoModel.getValueAt(r, c); return o == null ? "" : o; }
     // 服务器推回自己的 USERINFO("字段: 值|字段: 值")→ 回填表格,末尾始终留一行空行供直接输入
     void populateMyInfo(String data) {
         infoModel.setRowCount(0);
+        loadedFields.clear();                 // 重新记录"服务器当前有哪些字段",作为下次保存的删除基准
         if(data != null && data.trim().length() > 0) {
             StringTokenizer st = new StringTokenizer(data, "|");
             while(st.hasMoreTokens()) {
                 String t = st.nextToken();
                 int p = t.indexOf(": ");
-                if(p > 0) infoModel.addRow(new Object[]{ t.substring(0, p).trim(), t.substring(p + 2) });
+                if(p > 0) {
+                    String fld = t.substring(0, p).trim();
+                    infoModel.addRow(new Object[]{ fld, t.substring(p + 2) });
+                    loadedFields.add(fld);
+                }
             }
         }
         infoModel.addRow(new Object[]{"",""});
