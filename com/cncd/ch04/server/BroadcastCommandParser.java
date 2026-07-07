@@ -178,17 +178,19 @@ public class BroadcastCommandParser implements CommandParser {
         // 发送方回显 0x01 PMSENT <id> 目标 正文。id 记录作用域=目标昵称,供已读回执/撤回定位
         long id = MainServer.nextMsgId();
         MainServer.recordMsg(id, cc.nick, user);
-        boolean found = cc.sendTo(user, "" + MainServer.PUSHMARKER + "PM " + id + " " + cc.nick + " " + body);
-        if(found) {
-            cc.sendMessage("" + MainServer.PUSHMARKER + "PMSENT " + id + " " + user + " " + body);
+        // ★先判在线,离线就绕开 sendTo:否则 sendTo 的"未找到即报错"分支会先弹一句 "Unable to find user",
+        // 即便消息其实被存成了离线消息,发送方也会误以为发失败(功能十六 bug 修复)
+        if(isOnline(cc, user)) {
+            cc.sendTo(user, "" + MainServer.PUSHMARKER + "PM " + id + " " + cc.nick + " " + body); // 在线:直接投递
+            cc.sendMessage("" + MainServer.PUSHMARKER + "PMSENT " + id + " " + user + " " + body); // 回显"已送达"
         } else if(ds.isRegistered(user)) {
-            // 对方离线但已注册 → 存为离线消息,上线验证身份后补发(功能十六)
+            // 对方离线但已注册 → 存为离线消息,上线验证身份后补发(功能十六);发送方回显 PMOFF 显示自己发的气泡+"已暂存"
             ds.addOffline(user, cc.nick, body);
-            // 给发送方回一条离线回显 PMOFF:与在线时的 PMSENT 一样在会话里显示自己发的气泡,
-            // 只是状态标注"已暂存,对方上线后送达"(此前只回纯文本提示,发送方看不到自己发的消息)
             cc.sendMessage("" + MainServer.PUSHMARKER + "PMOFF " + id + " " + user + " " + body);
+        } else {
+            // 对方不在线且不是注册用户:离线消息要求身份可验证(防冒领),无法留言,给出明确提示(不再是含糊的 "Unable to find user")
+            cc.sendMessage("<font color=\"#cc0000\">对方 " + user + " 不在线,且不是注册用户,消息无法送达(仅注册用户可留离线消息)</font>");
         }
-        // 未注册的离线用户:sendTo 已提示 "Unable to find user"
     }
     // 上线并确立身份后,补发暂存的离线消息(功能十六);仅对已验证的注册昵称投递
     private void deliverOffline(ConnectedClient cc) {
